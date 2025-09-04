@@ -1,3 +1,11 @@
+"""
+Script for evaluating entropy-based change point detection algorithms on real and synthetic time series data.
+"""
+
+__author__ = "Kirill Gribanov"
+__copyright__ = "Copyright (c) 2025 PySATL project"
+__license__ = "SPDX-License-Identifier: MIT"
+
 import matplotlib.pyplot as plt
 import numpy as np
 import yfinance as yf
@@ -34,7 +42,7 @@ algorithms = [
 
 
 def analyze_series(name, series):
-    print(f"\n=== Анализ серии: {name} ===")
+    print(f"\n=== Analyzing time series: {name} ===")
     for algo in algorithms:
         if hasattr(algo, "reset"):
             algo.reset()
@@ -46,7 +54,7 @@ def analyze_series(name, series):
                 if cp is not None and cp < len(series):
                     change_points.append(cp)
 
-        print(f"{algo.__class__.__name__}: Обнаруженные change points: {change_points}")
+        print(f"{algo.__class__.__name__}: Detected change points: {change_points}")
         plot_series_with_cps(name, series, change_points, algo.__class__.__name__)
 
 

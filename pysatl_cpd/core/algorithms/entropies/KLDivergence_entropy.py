@@ -1,3 +1,12 @@
+"""
+Module implements the Kullback-Leibler Divergence-based algorithm for online change point detection.
+"""
+
+__author__ = "Kirill Gribanov"
+__copyright__ = "Copyright (c) 2025 PySATL project"
+__license__ = "SPDX-License-Identifier: MIT"
+
+
 from collections import deque
 from typing import Any, Optional
 

@@ -1,3 +1,11 @@
+"""
+Module implements the Permutation Entropy algorithm for online change point detection.
+"""
+
+__author__ = "Kirill Gribanov"
+__copyright__ = "Copyright (c) 2025 PySATL project"
+__license__ = "SPDX-License-Identifier: MIT"
+
 from collections import Counter, deque
 from typing import Optional
 
