@@ -396,8 +396,6 @@ def test_parameter_validation():
         assert params["k_constant"] == K_CONSTANT_INIT
         assert params["window_size"] == WINDOW_SIZE
 
-    import pytest
-
     with pytest.raises(ValueError):
         TsallisEntropyAlgorithm(q_parameter=Q_PARAMETER_INVALID)
 
@@ -744,7 +742,7 @@ def test_shannon_limit_approximation():
     entropies_near_1 = {}
     variable = 2
 
-    RATIO_THRESHOLD = 100  # максимальное допустимое соотношение энтропий
+    RATIO_THRESHOLD = 100  # maximum allowed entropy ratio
 
     for q in q_near_1:
         algorithm = TsallisEntropyAlgorithm(window_size=80, q_parameter=q, k_constant=1.0, normalize=False)
