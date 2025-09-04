@@ -1,5 +1,20 @@
 """
-Module implements the Kullback-Leibler Divergence-based algorithm for online change point detection.
+Module implementing the Kullback-Leibler Divergence (KLD) algorithm for online change-point detection.
+
+The detector maintains two sliding windows: a *reference* window and a *current* window.
+It computes the divergence between the empirical distributions of these windows using either
+histogram binning or kernel density estimation (KDE). A change-point is signaled when
+the divergence exceeds a user-defined threshold or when a sustained divergence trend is observed.
+
+Two options are supported:
+1. Histogram-based KL divergence with Laplace smoothing;
+2. KDE-based KL divergence with Gaussian kernels and continuous evaluation.
+
+Optionally, the divergence can be made symmetric::
+
+    KL_sym(P, Q) = 0.5 * ( KL(P || Q) + KL(Q || P) )
+
+This implementation supports streaming (online) processing of time series data.
 """
 
 __author__ = "Kirill Gribanov"
@@ -18,6 +33,32 @@ from pysatl_cpd.core.algorithms.online_algorithm import OnlineAlgorithm
 
 
 class KLDivergenceAlgorithm(OnlineAlgorithm):
+    """
+    Online change-point detector based on Kullback-Leibler Divergence.
+
+    Parameters
+    ----------
+    window_size : int, default=100
+        Size of the current sliding window.
+    reference_window_size : int or None, default=None
+        Size of the reference window. If ``None``, set equal to ``window_size``.
+    threshold : float, default=0.5
+        Threshold above which KL divergence indicates a change.
+    num_bins : int, default=20
+        Number of histogram bins used if histogram mode is active.
+    use_kde : bool, default=False
+        Whether to use KDE instead of histograms for estimating distributions.
+    symmetric : bool, default=True
+        If True, compute symmetric KL divergence.
+    smoothing_factor : float, default=1e-10
+        Additive smoothing factor to avoid division by zero in probability estimates.
+
+    Notes
+    -----
+    - Uses histogram or KDE estimates to approximate probability densities.
+    - The reference distribution is updated whenever a change is detected.
+    """
+
     def __init__(
         self,
         window_size: int = 100,
@@ -51,6 +92,19 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
         self._reference_updated: bool = False
 
     def detect(self, observation: np.float64 | npt.NDArray[np.float64]) -> bool:
+        """
+        Ingest a new observation (or batch) and update the detection state.
+
+        Parameters
+        ----------
+        observation : float or ndarray of float
+            A single value or array of values to process.
+
+        Returns
+        -------
+        bool
+            ``True`` if a change-point is flagged, otherwise ``False``.
+        """
         if isinstance(observation, np.ndarray):
             for obs in observation:
                 self._process_single_observation(float(obs))
@@ -60,6 +114,19 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
         return self._last_change_point is not None
 
     def localize(self, observation: np.float64 | npt.NDArray[np.float64]) -> Optional[int]:
+        """
+        Process input and return index of detected change-point.
+
+        Parameters
+        ----------
+        observation : float or ndarray of float
+            Incoming sample(s).
+
+        Returns
+        -------
+        int or None
+            Approximate index of detected change-point, or ``None`` if none found.
+        """
         change_detected = self.detect(observation)
 
         if change_detected:
@@ -70,7 +137,15 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
         return None
 
     def _process_single_observation(self, observation: float) -> None:
-        v = 5
+        """
+        Process a single observation, update buffers, compute KL divergence if ready.
+
+        Parameters
+        ----------
+        observation : float
+            New value from the stream.
+        """
+        v = 5  # length for trend-based detection
         self._current_buffer.append(observation)
         self._position += 1
 
@@ -82,24 +157,33 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
             return
 
         kl_divergence = self._calculate_kl_divergence()
-
         if np.isinf(kl_divergence) or np.isnan(kl_divergence):
             kl_divergence = 0.0
 
         self._kl_values.append(kl_divergence)
 
+        # Criterion 1: instantaneous KL > threshold
         if kl_divergence > self._threshold:
             self._last_change_point = self._position - self._window_size // 2
             self._update_reference_distribution()
 
+        # Criterion 2: sustained KL trend
         if len(self._kl_values) >= v:
-            recent_kl = self._kl_values[-5:]
+            recent_kl = self._kl_values[-v:]
             kl_trend = np.mean(recent_kl)
             if kl_trend > self._threshold * 0.8:
                 self._last_change_point = self._position - self._window_size // 4
                 self._update_reference_distribution()
 
     def _calculate_kl_divergence(self) -> float:
+        """
+        Compute KL divergence between reference and current windows.
+
+        Returns
+        -------
+        float
+            KL divergence estimate.
+        """
         reference_data = np.array(list(self._reference_buffer))
         current_data = np.array(list(self._current_buffer))
 
@@ -111,8 +195,23 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
     def _calculate_kl_divergence_histogram(
         self, ref_data: npt.NDArray[np.float64], curr_data: npt.NDArray[np.float64]
     ) -> float:
-        data_min = float(np.min(np.array([ref_data.min(), curr_data.min()])))
-        data_max = float(np.max(np.array([ref_data.max(), curr_data.max()])))
+        """
+        Compute KL divergence using histogram binning.
+
+        Parameters
+        ----------
+        ref_data : ndarray of float
+            Reference window.
+        curr_data : ndarray of float
+            Current window.
+
+        Returns
+        -------
+        float
+            KL divergence (symmetric if ``symmetric=True``).
+        """
+        data_min = float(np.min([ref_data.min(), curr_data.min()]))
+        data_max = float(np.max([ref_data.max(), curr_data.max()]))
 
         margin = (data_max - data_min) * 0.01
         bin_edges = np.linspace(data_min - margin, data_max + margin, self._num_bins + 1)
@@ -134,14 +233,28 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
         if self._symmetric:
             kl_qp = float(np.sum(curr_prob * np.log(curr_prob / ref_prob)))
             return (kl_pq + kl_qp) / 2
-        else:
-            return kl_pq
+        return kl_pq
 
     def _calculate_kl_divergence_kde(
         self, ref_data: npt.NDArray[np.float64], curr_data: npt.NDArray[np.float64]
     ) -> float:
-        data_min = float(np.min(np.array([ref_data.min(), curr_data.min()])))
-        data_max = float(np.max(np.array([ref_data.max(), curr_data.max()])))
+        """
+        Compute KL divergence using Gaussian KDE estimates.
+
+        Parameters
+        ----------
+        ref_data : ndarray of float
+            Reference window.
+        curr_data : ndarray of float
+            Current window.
+
+        Returns
+        -------
+        float
+            KL divergence (symmetric if ``symmetric=True``).
+        """
+        data_min = float(np.min([ref_data.min(), curr_data.min()]))
+        data_max = float(np.max([ref_data.max(), curr_data.max()]))
         margin = (data_max - data_min) * 0.1
         x_eval = np.linspace(data_min - margin, data_max + margin, 1000)
 
@@ -163,19 +276,29 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
         if self._symmetric:
             kl_qp = float(np.sum(curr_density * np.log(curr_density / ref_density)) * dx)
             return (kl_pq + kl_qp) / 2
-        else:
-            return kl_pq
+        return kl_pq
 
     def _update_reference_distribution(self) -> None:
+        """Reset the reference buffer using the current buffer (after detection)."""
         self._reference_buffer.clear()
         for value in self._current_buffer:
             self._reference_buffer.append(value)
         self._reference_updated = True
 
     def get_kl_history(self) -> list[float]:
+        """Return history of computed KL divergence values."""
         return self._kl_values.copy()
 
     def get_current_parameters(self) -> dict[str, float | int | bool]:
+        """
+        Get current hyperparameters as dictionary.
+
+        Returns
+        -------
+        dict
+            Keys: ``window_size``, ``reference_window_size``, ``threshold``,
+            ``num_bins``, ``use_kde``, ``symmetric``, ``smoothing_factor``.
+        """
         return {
             "window_size": self._window_size,
             "reference_window_size": self._reference_window_size,
@@ -194,6 +317,27 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
         symmetric: Optional[bool] = None,
         smoothing_factor: Optional[float] = None,
     ) -> None:
+        """
+        Update detector hyperparameters.
+
+        Parameters
+        ----------
+        threshold : float, optional
+            New detection threshold (>0).
+        num_bins : int, optional
+            New number of histogram bins (>1).
+        use_kde : bool, optional
+            Switch to KDE or histogram mode.
+        symmetric : bool, optional
+            Enable/disable symmetric KL computation.
+        smoothing_factor : float, optional
+            New smoothing factor for probability estimates.
+
+        Raises
+        ------
+        ValueError
+            If provided values are invalid.
+        """
         if threshold is not None:
             if threshold <= 0:
                 raise ValueError("Threshold must be positive")
@@ -210,6 +354,20 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
             self._smoothing_factor = smoothing_factor
 
     def get_distribution_comparison(self) -> dict[str, float]:
+        """
+        Compare reference and current distributions using multiple statistics.
+
+        Returns
+        -------
+        dict
+            Includes:
+            - ``kl_divergence``
+            - ``reference_mean``, ``reference_std``
+            - ``current_mean``, ``current_std``
+            - ``mean_difference``
+            - ``std_ratio``
+            - ``ks_statistic``, ``ks_pvalue``
+        """
         if len(self._reference_buffer) < self._reference_window_size or len(self._current_buffer) < self._window_size:
             return {}
 
@@ -235,6 +393,18 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
         }
 
     def analyze_distributions(self) -> dict[str, Any]:
+        """
+        Provide extended diagnostic statistics between reference and current windows.
+
+        Returns
+        -------
+        dict
+            Extends ``get_distribution_comparison`` with:
+            - ``reference_entropy``, ``current_entropy``
+            - ``entropy_difference``
+            - ``reference_quantiles``, ``current_quantiles``
+            - ``quantile_differences``
+        """
         if len(self._reference_buffer) < self._reference_window_size or len(self._current_buffer) < self._window_size:
             return {}
 
@@ -261,6 +431,7 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
         }
 
     def reset(self) -> None:
+        """Clear all buffers, history, and reset state."""
         self._reference_buffer.clear()
         self._current_buffer.clear()
         self._kl_values.clear()
@@ -269,5 +440,13 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
         self._reference_updated = False
 
     def force_reference_update(self) -> None:
+        """
+        Forcefully refresh the reference buffer with the current buffer.
+
+        Notes
+        -----
+        This is typically called when no automatic change update is triggered,
+        but the user wants to realign reference and current windows.
+        """
         if len(self._current_buffer) >= self._window_size:
             self._update_reference_distribution()

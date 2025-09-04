@@ -46,8 +46,7 @@ class ShannonEntropyAlgorithm(OnlineAlgorithm):
     def __init__(
         self,
         window_size: int = 40,
-        step: int = 20,
-        bins: int = 10,
+        bins: int = 30,
         threshold: float = 0.3,
     ):
         """

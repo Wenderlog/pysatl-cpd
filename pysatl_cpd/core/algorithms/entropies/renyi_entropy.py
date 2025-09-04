@@ -1,5 +1,10 @@
 """
-Module implements the Renyi Entropy algorithm for online change point detection.
+Module implementing the Rényi Entropy algorithm for online change-point detection.
+
+The detector maintains a rolling (sliding) window over a univariate time series,
+estimates the empirical probability distribution in that window via fixed-width
+binning, computes Rényi entropy for the current window, and raises a change-point
+signal when short-term dynamics of entropy indicate a regime shift.
 """
 
 __author__ = "Kirill Gribanov"
@@ -16,6 +21,32 @@ from pysatl_cpd.core.algorithms.online_algorithm import OnlineAlgorithm
 
 
 class RenyiEntropyAlgorithm(OnlineAlgorithm):
+    """
+    Online change-point detector based on Rényi entropy.
+
+    Parameters
+    ----------
+    window_size : int, default=100
+        Sliding window length used to compute H.
+    alpha : float, default=0.5
+        Rényi order . Must be positive and not equal to 1.
+        - Smaller alpha (< 1) emphasizes support size / rare events.
+        - Larger alpha (> 1) emphasizes frequent events.
+    bins : int, default=10
+        Number of histogram bins used to estimate probabilities in the current window.
+        Bin edges are determined from running global min/max.
+    threshold : float, default=0.3
+        Decision threshold used by both:
+        - consecutive-entropy-difference test; and
+        - short-term variance test (with an internal scaling).
+
+    Notes
+    -----
+    - The detector processes observations in a streaming fashion.
+    - Change localization is returned as an approximate index near the center
+      (or quarter) of the current window depending on which criterion was triggered.
+    """
+
     def __init__(
         self,
         window_size: int = 100,
@@ -35,10 +66,25 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         self._entropy_values: list[float] = []
         self._position: int = 0
         self._last_change_point: Optional[int] = None
+
+        # Running range used to define stable bin edges across windows
         self._global_min: Optional[float] = None
         self._global_max: Optional[float] = None
 
     def detect(self, observation: np.float64 | npt.NDArray[np.float64]) -> bool:
+        """
+        Ingest a new observation (or a batch) and update the detection state.
+
+        Parameters
+        ----------
+        observation : float or ndarray of float
+            A single value or a 1-D array of values to process sequentially.
+
+        Returns
+        -------
+        bool
+            ``True`` if a change-point was flagged after processing the input, ``False`` otherwise.
+        """
         if isinstance(observation, np.ndarray):
             for obs in observation:
                 self._process_single_observation(float(obs))
@@ -48,6 +94,20 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         return self._last_change_point is not None
 
     def localize(self, observation: np.float64 | npt.NDArray[np.float64]) -> Optional[int]:
+        """
+        Process input and return the index of a detected change-point if present.
+
+        Parameters
+        ----------
+        observation : float or ndarray of float
+            A single value or a 1-D array of values to process.
+
+        Returns
+        -------
+        int or None
+            Estimated change-point index (0-based, relative to the processed stream),
+            or ``None`` if no change-point is detected.
+        """
         change_detected = self.detect(observation)
 
         if change_detected:
@@ -58,15 +118,25 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         return None
 
     def _process_single_observation(self, observation: float) -> None:
-        v = 2
+        """
+        Process a single value, update buffers and Rényi entropy, and run decision rules.
+
+        Parameters
+        ----------
+        observation : float
+            New sample from the stream.
+        """
+        v = 2  # minimal history for first-difference test
         self._buffer.append(observation)
         self._position += 1
 
+        # Update running global min/max for stable binning
         if self._global_min is None or observation < self._global_min:
             self._global_min = observation
         if self._global_max is None or observation > self._global_max:
             self._global_max = observation
 
+        # Wait until we have a full window
         if len(self._buffer) < self._window_size:
             return
 
@@ -74,11 +144,13 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         current_entropy = self._calculate_renyi_entropy(current_window)
         self._entropy_values.append(current_entropy)
 
+        # Criterion 1: absolute difference in consecutive entropies
         if len(self._entropy_values) >= v:
             entropy_diff = abs(self._entropy_values[-1] - self._entropy_values[-2])
             if entropy_diff > self._threshold:
                 self._last_change_point = self._position - self._window_size // 2
 
+        # Criterion 2: short-term variance over last 5 values
         if len(self._entropy_values) >= v + 3:
             recent_entropies = self._entropy_values[-5:]
             entropy_variance = np.var(recent_entropies)
@@ -86,6 +158,25 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
                 self._last_change_point = self._position - self._window_size // 4
 
     def _calculate_renyi_entropy(self, time_series: npt.NDArray[np.float64]) -> float:
+        """
+        Compute Rényi entropy for the given window using histogram probabilities.
+
+        Parameters
+        ----------
+        time_series : ndarray of float, shape (N,)
+            The current rolling window.
+
+        Returns
+        -------
+        float
+            The computed Rényi entropy (natural logarithm base). Returns ``0.0`` when
+            probabilities are degenerate (e.g., all mass in a single bin) or inputs are too short.
+
+        Notes
+        -----
+        - Uses ``_compute_probabilities`` with global min/max to form fixed edges.
+        - Supports  alpha=0 and  alpha→∞ special cases;  alpha=1 (Shannon) is excluded by input validation.
+        """
         if len(time_series) == 0:
             return 0.0
 
@@ -93,20 +184,40 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         if len(probabilities) == 0 or all(p == 0 for p in probabilities):
             return 0.0
 
+        # Special cases
         if self._alpha == 0:
             non_zero_count = sum(1 for p in probabilities if p > 0)
             return float(np.log(non_zero_count))
         elif np.isinf(self._alpha):
             max_prob = max(probabilities)
             return float(-np.log(max_prob)) if max_prob > 0 else 0.0
-        else:
-            power_sum = sum(p**self._alpha for p in probabilities if p > 0)
-            if power_sum <= 0:
-                return 0.0
-            renyi_entropy = (1 / (1 - self._alpha)) * np.log(power_sum)
-            return float(renyi_entropy)
+
+        # General case  alpha ≠ 0,1,∞
+        power_sum = sum(p**self._alpha for p in probabilities if p > 0)
+        if power_sum <= 0:
+            return 0.0
+        renyi_entropy = (1 / (1 - self._alpha)) * np.log(power_sum)
+        return float(renyi_entropy)
 
     def _compute_probabilities(self, time_series: npt.NDArray[np.float64]) -> list[float]:
+        """
+        Estimate a discrete probability distribution in the current window via histogramming.
+
+        Parameters
+        ----------
+        time_series : ndarray of float, shape (N,)
+            Values from the current rolling window.
+
+        Returns
+        -------
+        list of float
+            Probability of each bin (summing to 1), or an empty list if binning is not possible.
+
+        Notes
+        -----
+        - Uses ``self._global_min`` and ``self._global_max`` to define ``bins+1`` edges.
+        - If global range collapses to a point, returns ``[1.0]``.
+        """
         if self._global_min is None or self._global_max is None:
             return []
 
@@ -115,10 +226,12 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
 
         bin_edges = np.linspace(self._global_min, self._global_max, self._bins + 1)
         digitized = np.digitize(time_series, bin_edges)
+
         bin_counts = Counter(digitized)
         total_count = len(time_series)
 
-        probabilities = []
+        probabilities: list[float] = []
+        # Only bins 1..bins correspond to intervals; bin 0 or bins+1 catch out-of-range
         for i in range(1, len(bin_edges)):
             key = np.int64(i)
             count = bin_counts.get(key, 0)
@@ -128,9 +241,24 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         return probabilities
 
     def get_entropy_history(self) -> list[float]:
+        """
+        Get the history of computed Rényi entropy values.
+
+        Returns
+        -------
+        list of float
+            A copy of the internal entropy sequence evaluated at processed steps.
+        """
         return self._entropy_values.copy()
 
     def reset(self) -> None:
+        """
+        Clear internal state and buffered statistics.
+
+        Returns
+        -------
+        None
+        """
         self._buffer.clear()
         self._entropy_values.clear()
         self._position = 0

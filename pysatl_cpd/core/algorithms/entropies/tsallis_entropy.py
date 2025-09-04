@@ -1,5 +1,23 @@
 """
-Module implements the Tsallis Entropy algorithm for online change point detection.
+Module implementing the Tsallis Entropy (S_q) algorithm for online change-point detection.
+
+This detector maintains a sliding window over a univariate time series, estimates the
+(probability) distribution in the window (via histogram or KDE), computes Tsallis entropy
+for a chosen entropic index ``q``, and raises a change-point signal when short-term dynamics
+of S_q indicate a regime shift.
+
+For q ≠ 1, the Tsallis entropy is::
+
+    S_q(P) = k * (1 - Σ_i p_i^q) / (q - 1),
+
+where {p_i} are probabilities over a finite partition (histogram bins) or a continuous
+density p(x) via integration. For q → 1, S_q → Shannon entropy (not used directly here).
+
+This implementation supports:
+- discrete (histogram-based) and continuous (KDE-based) estimation,
+- optional normalization by the maximum Tsallis entropy for the given number of non-zero states,
+- multi-q mode that aggregates several q-values into a single score,
+- multiple detection criteria (first difference, trend, variance, multi-q voting).
 """
 
 __author__ = "Kirill Gribanov"
@@ -19,6 +37,38 @@ from pysatl_cpd.core.algorithms.online_algorithm import OnlineAlgorithm
 
 
 class TsallisEntropyAlgorithm(OnlineAlgorithm):
+    """
+    Online change-point detector based on Tsallis entropy S_q.
+
+    Parameters
+    ----------
+    window_size : int, default=100
+        Sliding window length used for entropy computation.
+    q_parameter : float, default=2.0
+        Entropic index q (q ≠ 1). Smaller q (< 1) emphasizes support/rare events;
+        larger q (> 1) emphasizes frequent events.
+    k_constant : float, default=1.0
+        Constant factor (usually k = 1 in normalized units).
+    threshold : float, default=0.1
+        Decision threshold for the detection rules.
+    num_bins : int, default=20
+        Number of histogram bins for discrete S_q estimation.
+    use_kde : bool, default=False
+        If True, compute continuous Tsallis via Gaussian KDE + numerical integration.
+        If False, use histogram-based discrete S_q.
+    normalize : bool, default=True
+        If True (discrete mode), normalize S_q by its theoretical maximum (uniform distribution
+        over the observed non-zero states).
+    multi_q : bool, default=False
+        If True, compute S_q for a set of q-values and combine them into one score.
+
+    Notes
+    -----
+    - The detector processes observations in a streaming fashion.
+    - Change localization is returned as an approximate index near the center/quarter of the
+      current window depending on which rule was triggered.
+    """
+
     def __init__(
         self,
         window_size: int = 100,
@@ -61,6 +111,19 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         self._last_change_point: Optional[int] = None
 
     def detect(self, observation: np.float64 | npt.NDArray[np.float64]) -> bool:
+        """
+        Ingest a new observation (or a batch) and update the detection state.
+
+        Parameters
+        ----------
+        observation : float or ndarray of float
+            A single value or a 1-D array of values to process sequentially.
+
+        Returns
+        -------
+        bool
+            ``True`` if a change-point was flagged after processing the input, ``False`` otherwise.
+        """
         if isinstance(observation, np.ndarray):
             for obs in observation:
                 self._process_single_observation(float(obs))
@@ -70,6 +133,20 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         return self._last_change_point is not None
 
     def localize(self, observation: np.float64 | npt.NDArray[np.float64]) -> Optional[int]:
+        """
+        Process input and return the index of a detected change-point if present.
+
+        Parameters
+        ----------
+        observation : float or ndarray of float
+            A single value or a 1-D array of values to process.
+
+        Returns
+        -------
+        int or None
+            Estimated change-point index (0-based, relative to the processed stream),
+            or ``None`` if no change-point is detected.
+        """
         change_detected = self.detect(observation)
 
         if change_detected:
@@ -80,6 +157,14 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         return None
 
     def _process_single_observation(self, observation: float) -> None:
+        """
+        Process a single sample, update buffers and S_q, and run decision rules.
+
+        Parameters
+        ----------
+        observation : float
+            New sample from the stream.
+        """
         v1 = 2
         self._buffer.append(observation)
         self._position += 1
@@ -95,7 +180,6 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
                 entropy = self._calculate_tsallis_entropy(current_window, q)
                 entropies[q] = entropy
                 self._multi_entropy_values[q].append(entropy)
-
             current_entropy = self._combine_multi_q_entropies(entropies)
         else:
             current_entropy = self._calculate_tsallis_entropy(current_window, self._q_parameter)
@@ -107,7 +191,6 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
 
         if len(self._entropy_values) >= v1:
             entropy_diff = abs(self._entropy_values[-1] - self._entropy_values[-2])
-
             if entropy_diff > self._threshold:
                 self._last_change_point = self._position - self._window_size // 2
 
@@ -118,12 +201,47 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
             self._detect_multi_q_changes()
 
     def _calculate_tsallis_entropy(self, time_series: npt.NDArray[np.float64], q: float) -> float:
+        """
+        Compute Tsallis entropy S_q for the given window.
+
+        Parameters
+        ----------
+        time_series : ndarray of float, shape (N,)
+            Current rolling window.
+        q : float
+            Entropic index (q ≠ 1).
+
+        Returns
+        -------
+        float
+            Tsallis entropy value (possibly normalized). Returns ``0.0`` on degenerate inputs.
+
+        Notes
+        -----
+        - If ``use_kde`` is True, use continuous definition via KDE + integration.
+        - Otherwise, compute discrete version via histogram probabilities.
+        """
         if self._use_kde:
             return self._calculate_continuous_tsallis_entropy(time_series, q)
         else:
             return self._calculate_discrete_tsallis_entropy(time_series, q)
 
     def _calculate_discrete_tsallis_entropy(self, time_series: npt.NDArray[np.float64], q: float) -> float:
+        """
+        Discrete Tsallis entropy using histogram probabilities.
+
+        Parameters
+        ----------
+        time_series : ndarray of float, shape (N,)
+            Current rolling window.
+        q : float
+            Entropic index.
+
+        Returns
+        -------
+        float
+            S_q for the discrete distribution in the window (optionally normalized).
+        """
         hist, _ = np.histogram(time_series, bins=self._num_bins, density=False)
         probabilities = hist / np.sum(hist)
         probabilities = probabilities[probabilities > 0]
@@ -147,6 +265,21 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         return float(tsallis_entropy)
 
     def _calculate_continuous_tsallis_entropy(self, time_series: npt.NDArray[np.float64], q: float) -> float:
+        """
+        Continuous Tsallis entropy using Gaussian KDE and numerical integration.
+
+        Parameters
+        ----------
+        time_series : ndarray of float, shape (N,)
+            Current rolling window.
+        q : float
+            Entropic index.
+
+        Returns
+        -------
+        float
+            Continuous S_q estimated from KDE. Falls back to discrete S_q on numerical errors.
+        """
         try:
             kde = stats.gaussian_kde(time_series)
             data_min, data_max = np.min(time_series), np.max(time_series)
@@ -181,9 +314,25 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
             return float(tsallis_entropy)
 
         except Exception:
+            # Fallback to discrete estimate if KDE/integration fails
             return self._calculate_discrete_tsallis_entropy(time_series, q)
 
     def _calculate_max_discrete_tsallis_entropy(self, n_states: int, q: float) -> float:
+        """
+        Theoretical maximum of discrete S_q for a uniform distribution over n_states.
+
+        Parameters
+        ----------
+        n_states : int
+            Number of non-zero-probability states in the window.
+        q : float
+            Entropic index.
+
+        Returns
+        -------
+        float
+            Maximal S_q for the given n_states (k * ln(n_states) in Shannon limit).
+        """
         v = 1e-10
         if n_states <= 1:
             return 0.0
@@ -196,12 +345,22 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
             return float(self._k_constant * (1.0 / (q - 1.0)) * (1.0 - n_states * (p_uniform**q)))
 
     def _combine_multi_q_entropies(self, entropies: dict[float, float]) -> float:
+        """
+        Combine multiple S_q values into a single score (simple weighted average).
+
+        Parameters
+        ----------
+        entropies : dict[float, float]
+            Map {q: S_q(current window)}.
+
+        Returns
+        -------
+        float
+            Aggregated entropy score across q-values.
+        """
         weights = {}
         for q in entropies:
-            if q < 1 or q > 1:
-                weights[q] = 1.0
-            else:
-                weights[q] = 1.0
+            weights[q] = 1.0
 
         total_weight = sum(weights.values())
         if total_weight == 0:
@@ -211,6 +370,13 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         return combined_entropy
 
     def _detect_entropy_trend(self) -> None:
+        """
+        Trend test on recent S_q via linear regression slope.
+
+        Notes
+        -----
+        - Uses last 10 values; if |slope| > 0.5 * threshold, flags a change and localizes near the tail.
+        """
         v = 10
         if len(self._entropy_values) >= v:
             recent_entropies = self._entropy_values[-10:]
@@ -221,6 +387,14 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
                 self._last_change_point = self._position - 5
 
     def _detect_entropy_variance(self) -> None:
+        """
+        Variance-shift test between two recent halves of the S_q history.
+
+        Notes
+        -----
+        - Compares var(last 10 values) vs var(previous 10 values);
+          if |Δvar| > 0.3 * threshold, flags a change near the midpoint.
+        """
         v = 20
         if len(self._entropy_values) >= v:
             first_half = self._entropy_values[-20:-10]
@@ -233,6 +407,14 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
                 self._last_change_point = self._position - 10
 
     def _detect_multi_q_changes(self) -> None:
+        """
+        Majority-vote rule across q-values based on last-step S_q differences.
+
+        Notes
+        -----
+        - For each q, if |S_q(t) - S_q(t-1)| > 0.7 * threshold, that q votes for a change.
+        - If votes ≥ half + 1, flag a change near the tail.
+        """
         if not self._multi_q:
             return
 
@@ -251,12 +433,37 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
             self._last_change_point = self._position - 2
 
     def get_entropy_history(self) -> list[float]:
+        """
+        Get the history of aggregated Tsallis entropy values (single- or multi-q).
+
+        Returns
+        -------
+        list of float
+            A copy of the internal S_q sequence evaluated at processed steps.
+        """
         return self._entropy_values.copy()
 
     def get_multi_q_history(self) -> dict[float, list[float]]:
+        """
+        Get the history of Tsallis entropy values for each q (only in multi-q mode).
+
+        Returns
+        -------
+        dict[float, list[float]]
+            Mapping {q: list of S_q values over time}.
+        """
         return {q: values.copy() for q, values in self._multi_entropy_values.items()}
 
     def get_current_parameters(self) -> dict[str, Any]:
+        """
+        Return current configuration and important internal parameters.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys: window_size, q_parameter, k_constant, threshold,
+            num_bins, use_kde, normalize, multi_q, q_values.
+        """
         return {
             "window_size": self._window_size,
             "q_parameter": self._q_parameter,
@@ -279,6 +486,31 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         normalize: Optional[bool] = None,
         multi_q: Optional[bool] = None,
     ) -> None:
+        """
+        Update detector hyperparameters in place.
+
+        Parameters
+        ----------
+        q_parameter : float or None, optional
+            New entropic index q (q ≠ 1). Ignored in multi-q mode.
+        k_constant : float or None, optional
+            New k constant (> 0).
+        threshold : float or None, optional
+            New decision threshold.
+        num_bins : int or None, optional
+            New number of histogram bins (> 1).
+        use_kde : bool or None, optional
+            Toggle continuous KDE-based S_q.
+        normalize : bool or None, optional
+            Toggle normalization (discrete mode).
+        multi_q : bool or None, optional
+            Toggle multi-q mode; resets per-q histories if turned on.
+
+        Returns
+        -------
+        None
+        """
+
         def set_q_param(q: float) -> None:
             v = 1e-10
             if abs(q - 1.0) < v:
@@ -299,22 +531,16 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
 
         if q_parameter is not None:
             set_q_param(q_parameter)
-
         if k_constant is not None:
             set_k_const(k_constant)
-
         if threshold is not None:
             self._threshold = threshold
-
         if num_bins is not None:
             set_num_bins_func(num_bins)
-
         if use_kde is not None:
             self._use_kde = use_kde
-
         if normalize is not None:
             self._normalize = normalize
-
         if multi_q is not None:
             self._multi_q = multi_q
             if multi_q:
@@ -324,12 +550,24 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
                 self._q_values = [self._q_parameter]
 
     def analyze_q_sensitivity(self) -> dict[str, Any]:
+        """
+        Evaluate S_q sensitivity to a set of q-values on the current window.
+
+        Returns
+        -------
+        dict
+            Keys:
+            - 'q_entropies': {q: S_q(current window)}
+            - 'entropy_ratios': ratios vs base q=2.0 (if defined)
+            - 'most_sensitive_q': argmax |S_q|
+            - 'entropy_variance_across_q': variance of S_q over tested q
+        """
         if len(self._buffer) < self._window_size:
             return {}
 
         current_window = np.array(list(self._buffer)[-self._window_size :])
         test_q_values = [0.1, 0.5, 1.5, 2.0, 2.5, 3.0, 5.0]
-        q_entropies = {}
+        q_entropies: dict[float, float] = {}
 
         for q in test_q_values:
             try:
@@ -341,18 +579,27 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         entropy_ratios = {}
         base_q = 2.0
         if base_q in q_entropies:
+            base_val = q_entropies[base_q]
             for q, entropy in q_entropies.items():
-                if q != base_q and q_entropies[base_q] != 0:
-                    entropy_ratios[q] = entropy / q_entropies[base_q]
+                if q != base_q and base_val != 0:
+                    entropy_ratios[q] = entropy / base_val
 
         return {
             "q_entropies": q_entropies,
             "entropy_ratios": entropy_ratios,
             "most_sensitive_q": max(q_entropies.keys(), key=lambda x: abs(q_entropies[x])) if q_entropies else None,
-            "entropy_variance_across_q": np.var(list(q_entropies.values())) if q_entropies else 0,
+            "entropy_variance_across_q": np.var(list(q_entropies.values())) if q_entropies else 0.0,
         }
 
     def get_complexity_metrics(self) -> dict[str, Any]:
+        """
+        Compute auxiliary complexity metrics from S_q at several regimes.
+
+        Returns
+        -------
+        dict
+            Includes sub-/extensive/super-extensive S_q, their ratio, and basic window stats.
+        """
         if len(self._buffer) < self._window_size:
             return {}
 
@@ -373,6 +620,13 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         }
 
     def reset(self) -> None:
+        """
+        Clear internal state and buffered statistics.
+
+        Returns
+        -------
+        None
+        """
         self._buffer.clear()
         self._entropy_values.clear()
         self._multi_entropy_values = {q: [] for q in self._q_values}

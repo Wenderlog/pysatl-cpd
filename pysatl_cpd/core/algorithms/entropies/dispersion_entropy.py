@@ -1,5 +1,22 @@
 """
-Module implements the Dispersion Entropy algorithm for online change point detection.
+Module implementing the Dispersion Entropy (DisEn) algorithm for online change-point detection.
+
+The detector maintains a rolling window over a univariate time series, maps values to
+``c`` discrete classes via the Gaussian CDF, forms dispersion patterns of length ``m``
+with time delay ``τ``, and computes the Shannon entropy of the pattern distribution::
+
+    DisEn(m, c, τ) = - Σ p(pattern) * log(p(pattern))
+
+where ``c`` is the number of classes, ``m`` is the embedding dimension, and ``τ`` is the delay.
+Optionally, the entropy can be normalized by the maximal value ``log(c^m)``.
+
+A change-point is signaled when any of the following holds:
+1) The absolute difference between consecutive entropy values exceeds ``threshold``;
+2) The short-term variance of entropy exceeds ``threshold``;
+3) The mean shift between two consecutive short windows of entropy exceeds ``1.5 * threshold``.
+
+The implementation supports streaming (online) processing and returns approximate
+change-point indices relative to the processed stream.
 """
 
 __author__ = "Kirill Gribanov"
@@ -18,6 +35,32 @@ from pysatl_cpd.core.algorithms.online_algorithm import OnlineAlgorithm
 
 
 class DispersionEntropyAlgorithm(OnlineAlgorithm):
+    """
+    Online change-point detector based on Dispersion Entropy (DisEn).
+
+    Parameters
+    ----------
+    window_size : int, default=100
+        Sliding window length used for entropy computation.
+    embedding_dim : int, default=3
+        Embedding dimension ``m`` of dispersion patterns.
+    num_classes : int, default=6
+        Number of discrete classes ``c`` used to quantize the window via Gaussian CDF.
+    time_delay : int, default=1
+        Delay ``τ`` between consecutive elements of a dispersion pattern.
+    threshold : float, default=0.2
+        Decision threshold used in the detection criteria.
+    normalize : bool, default=True
+        If True, normalize entropy by ``log(c^m)``.
+
+    Notes
+    -----
+    - If ``c^m >= window_size``, the pattern space becomes too large for reliable
+      estimation from the window; a ``ValueError`` is raised.
+    - Observations are processed online; change localization is approximate and tied
+      to the center/quarter of the active window depending on which criterion triggers.
+    """
+
     def __init__(
         self,
         window_size: int = 100,
@@ -46,6 +89,19 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         self._last_change_point: Optional[int] = None
 
     def detect(self, observation: np.float64 | npt.NDArray[np.float64]) -> bool:
+        """
+        Ingest a new observation (or a batch) and update the internal detection state.
+
+        Parameters
+        ----------
+        observation : float or ndarray of float
+            A single value or a 1-D array of values to process sequentially.
+
+        Returns
+        -------
+        bool
+            ``True`` if a change-point was flagged after processing the input, ``False`` otherwise.
+        """
         if isinstance(observation, np.ndarray):
             for obs in observation:
                 self._process_single_observation(float(obs))
@@ -55,6 +111,20 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         return self._last_change_point is not None
 
     def localize(self, observation: np.float64 | npt.NDArray[np.float64]) -> Optional[int]:
+        """
+        Ingest input and return the index of a detected change-point if present.
+
+        Parameters
+        ----------
+        observation : float or ndarray of float
+            A single value or a 1-D array of values to process.
+
+        Returns
+        -------
+        int or None
+            Estimated change-point index (0-based, relative to the processed stream),
+            or ``None`` if no change-point is detected.
+        """
         change_detected = self.detect(observation)
 
         if change_detected:
@@ -65,10 +135,22 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         return None
 
     def _process_single_observation(self, observation: float) -> None:
+        """
+        Process a single new observation and update the internal DisEn statistics.
+
+        Parameters
+        ----------
+        observation : float
+            New value to be appended to the rolling buffer.
+
+        Returns
+        -------
+        None
+        """
         self._buffer.append(observation)
         self._position += 1
-        v = 10
-        v1 = 2
+        v = 10  # window length (in entropy samples) for mean-shift check
+        v1 = 2  # minimal length (in entropy samples) for first-difference check
 
         min_required = self._window_size + (self._embedding_dim - 1) * self._time_delay
         if len(self._buffer) < min_required:
@@ -82,30 +164,51 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
 
         self._entropy_values.append(current_entropy)
 
+        # Criterion 1: first-order entropy difference
         if len(self._entropy_values) >= v1:
             entropy_diff = abs(self._entropy_values[-1] - self._entropy_values[-2])
-
             if entropy_diff > self._threshold:
                 self._last_change_point = self._position - self._window_size // 2
 
+        # Criterion 2: short-term variance of entropy
         if len(self._entropy_values) >= v1 + 3:
             recent_entropies = self._entropy_values[-5:]
             entropy_variance = np.var(recent_entropies)
-            np.mean(recent_entropies)
-
+            # mean not used in the current rule; kept for parity with ApEn/SampEn variants
+            _ = np.mean(recent_entropies)
             if entropy_variance > self._threshold:
                 self._last_change_point = self._position - self._window_size // 4
 
+        # Criterion 3: mean shift between two adjacent windows of entropy
         if len(self._entropy_values) >= v:
             window1 = self._entropy_values[-10:-5]
             window2 = self._entropy_values[-5:]
             mean1 = np.mean(window1)
             mean2 = np.mean(window2)
-
             if abs(mean2 - mean1) > self._threshold * 1.5:
                 self._last_change_point = self._position - 2
 
     def _calculate_dispersion_entropy(self, time_series: npt.NDArray[np.float64]) -> float:
+        """
+        Compute Dispersion Entropy for the given window.
+
+        Steps
+        -----
+        1) Standardize to ``N(μ, o)`` and apply Gaussian CDF to obtain ``y in (0, 1)``;
+        2) Discretize into ``c`` classes to get integer-coded series ``z`` in ``{1, ..., c}``;
+        3) Form dispersion patterns of length ``m`` with delay ``τ``;
+        4) Compute the Shannon entropy of pattern probabilities and (optionally) normalize.
+
+        Parameters
+        ----------
+        time_series : ndarray of float, shape (N,)
+            Current rolling window.
+
+        Returns
+        -------
+        float
+            Dispersion Entropy value for the window. Returns ``0.0`` when input is too short or degenerate.
+        """
         N = len(time_series)
         if self._embedding_dim > N:
             return 0.0
@@ -129,12 +232,38 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         return float(de_value)
 
     def _discretize_to_classes(self, y_series: npt.NDArray[np.float64]) -> npt.NDArray[np.int32]:
+        """
+        Map continuous values ``y in (0, 1)`` to integer classes ``{1, ..., c}``.
+
+        Parameters
+        ----------
+        y_series : ndarray of float, shape (N,)
+            Values after applying the Gaussian CDF to the window.
+
+        Returns
+        -------
+        ndarray of int32, shape (N,)
+            Discrete class labels in the range ``[1, c]``.
+        """
         rc_values = self._num_classes * y_series + 0.5
         z_series = np.round(rc_values).astype(np.int32)
         z_series = np.clip(z_series, 1, self._num_classes)
         return z_series
 
     def _create_dispersion_patterns(self, z_series: npt.NDArray[np.int32]) -> list[tuple[int, ...]]:
+        """
+        Construct dispersion patterns of length ``m`` with delay ``τ`` from class labels.
+
+        Parameters
+        ----------
+        z_series : ndarray of int32, shape (N,)
+            Discrete class labels in ``[1, c]``.
+
+        Returns
+        -------
+        list of tuple[int, ...]
+            List of length-``m`` patterns encoded as integer tuples.
+        """
         N = len(z_series)
         patterns = []
 
@@ -150,6 +279,19 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         return patterns
 
     def _calculate_pattern_probabilities(self, patterns: list[tuple[int, ...]]) -> dict[tuple[int, ...], float]:
+        """
+        Estimate pattern probabilities from the list of patterns.
+
+        Parameters
+        ----------
+        patterns : list of tuple[int, ...]
+            Dispersion patterns extracted from the current window.
+
+        Returns
+        -------
+        dict[tuple[int, ...], float]
+            Mapping from pattern to its empirical probability.
+        """
         if not patterns:
             return {}
 
@@ -165,6 +307,19 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         return pattern_probs
 
     def _calculate_shannon_entropy(self, pattern_probs: dict[tuple[int, ...], float]) -> float:
+        """
+        Compute Shannon entropy from pattern probabilities.
+
+        Parameters
+        ----------
+        pattern_probs : dict[tuple[int, ...], float]
+            Empirical probability distribution of dispersion patterns.
+
+        Returns
+        -------
+        float
+            ``- Σ p * log(p)`` (natural logarithm).
+        """
         if not pattern_probs:
             return 0.0
 
@@ -176,9 +331,32 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         return entropy
 
     def get_entropy_history(self) -> list[float]:
+        """
+        Get the history of computed Dispersion Entropy values.
+
+        Returns
+        -------
+        list of float
+            A copy of the internal DisEn sequence evaluated at processed steps.
+        """
         return self._entropy_values.copy()
 
     def get_current_parameters(self) -> dict[str, int | float | bool]:
+        """
+        Return a snapshot of the current algorithm parameters and derived capacities.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys:
+            - ``window_size``
+            - ``embedding_dim``
+            - ``num_classes``
+            - ``time_delay``
+            - ``threshold``
+            - ``normalize``
+            - ``max_patterns`` = ``c^m`` (pattern capacity)
+        """
         return {
             "window_size": self._window_size,
             "embedding_dim": self._embedding_dim,
@@ -197,6 +375,27 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         threshold: Optional[float] = None,
         normalize: Optional[bool] = None,
     ) -> None:
+        """
+        Update detector hyperparameters in place.
+
+        Parameters
+        ----------
+        embedding_dim : int or None, optional
+            New embedding dimension ``m``.
+        num_classes : int or None, optional
+            New number of classes ``c``.
+        time_delay : int or None, optional
+            New delay ``τ`` between pattern elements.
+        threshold : float or None, optional
+            New decision threshold.
+        normalize : bool or None, optional
+            Whether to normalize entropy values.
+
+        Raises
+        ------
+        ValueError
+            If the updated configuration violates ``c^m < window_size``.
+        """
         if embedding_dim is not None:
             self._embedding_dim = embedding_dim
         if num_classes is not None:
@@ -214,6 +413,15 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
             )
 
     def get_pattern_distribution(self) -> dict[tuple[int, ...], int]:
+        """
+        Return pattern counts for the current window (for diagnostics/inspection).
+
+        Returns
+        -------
+        dict[tuple[int, ...], int]
+            Mapping from pattern to its count in the current window.
+            Returns an empty dict if the buffer is not yet filled enough.
+        """
         if len(self._buffer) < self._window_size:
             return {}
 
@@ -234,6 +442,23 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         return pattern_counts
 
     def analyze_complexity(self) -> dict[str, Union[float, int]]:
+        """
+        Compute diagnostic complexity measures for the current window.
+
+        Returns
+        -------
+        dict
+            Diagnostic metrics including:
+            - ``dispersion_entropy``: current DisEn value
+            - ``normalized_entropy``: DisEn / log(c^m)
+            - ``unique_patterns``: number of distinct patterns observed
+            - ``max_possible_patterns``: ``c^m``
+            - ``pattern_diversity``: unique / max_possible
+            - ``window_std``: standard deviation of the window
+            - ``window_mean``: mean of the window
+
+            Returns an empty dict if the buffer is not yet filled enough.
+        """
         if len(self._buffer) < self._window_size:
             return {}
 
@@ -260,6 +485,13 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         }
 
     def reset(self) -> None:
+        """
+        Clear internal state and buffered statistics.
+
+        Returns
+        -------
+        None
+        """
         self._buffer.clear()
         self._entropy_values.clear()
         self._position = 0

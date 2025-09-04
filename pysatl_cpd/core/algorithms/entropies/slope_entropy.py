@@ -1,5 +1,11 @@
 """
-Module implements the Slope Entropy algorithm for online change point detection.
+Module implementing the Slope Entropy algorithm for online change-point detection.
+
+The detector slides a fixed-size window over a univariate time series, encodes
+adjacent differences (slopes) into a finite alphabet using two slope thresholds
+``delta`` and ``gamma``, estimates the entropy of the resulting slope-pattern
+distribution, and triggers a change when short-term fluctuations in this entropy
+exceed a decision threshold.
 """
 
 __author__ = "Kirill Gribanov"
@@ -16,6 +22,28 @@ from pysatl_cpd.core.algorithms.online_algorithm import OnlineAlgorithm
 
 
 class SlopeEntropyAlgorithm(OnlineAlgorithm):
+    """
+    Online change-point detector based on slope symbolization and entropy.
+
+    Parameters
+    ----------
+    window_size : int, default=100
+        Sliding window length used to compute slope entropy.
+    embedding_dim : int, default=3
+        Length (in samples) of each subsequence used to form slope patterns.
+        Each subsequence of length ``embedding_dim`` yields ``embedding_dim-1`` slope symbols.
+    gamma : float, default=1.0
+        Upper slope threshold. Slopes greater than ``gamma`` (or less than ``-gamma``) are encoded
+        as the most extreme symbols ``2`` and ``-2`` respectively.
+    delta : float, default=1e-3
+        Inner slope threshold separating “flat/ties” from gentle slopes. Must satisfy ``0 <= delta < gamma``.
+    threshold : float, default=0.3
+        Decision threshold for triggering changes from short-term entropy dynamics.
+    normalize : bool, default=True
+        If ``True``, normalize entropy by the maximum possible entropy given the set of
+        observed patterns in the current window (base-2).
+    """
+
     def __init__(
         self,
         window_size: int = 100,
@@ -41,6 +69,19 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         self._last_change_point: Optional[int] = None
 
     def detect(self, observation: np.float64 | npt.NDArray[np.float64]) -> bool:
+        """
+        Ingest a new observation (or a batch) and update the internal detection state.
+
+        Parameters
+        ----------
+        observation : float or ndarray of float
+            A single value or a 1-D array of values to process sequentially.
+
+        Returns
+        -------
+        bool
+            ``True`` if a change-point was flagged after processing the input, ``False`` otherwise.
+        """
         if isinstance(observation, np.ndarray):
             for obs in observation:
                 self._process_single_observation(float(obs))
@@ -50,6 +91,20 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         return self._last_change_point is not None
 
     def localize(self, observation: np.float64 | npt.NDArray[np.float64]) -> Optional[int]:
+        """
+        Ingest input and return the index of a detected change-point if present.
+
+        Parameters
+        ----------
+        observation : float or ndarray of float
+            A single value or a 1-D array of values to process.
+
+        Returns
+        -------
+        int or None
+            Estimated change-point index (0-based, relative to the processed stream),
+            or ``None`` if no change-point is detected.
+        """
         change_detected = self.detect(observation)
 
         if change_detected:
@@ -60,6 +115,24 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         return None
 
     def _process_single_observation(self, observation: float) -> None:
+        """
+        Process a single new observation and update slope-entropy statistics.
+
+        Parameters
+        ----------
+        observation : float
+            New value to be appended to the rolling buffer.
+
+        Notes
+        -----
+        Detection logic combines three short-term tests:
+        1) Absolute difference between the last two entropy values.
+        2) Difference between means of two consecutive 5-sample entropy blocks.
+        3) Difference between variances of two consecutive 4-sample entropy blocks.
+
+        If any test exceeds its (scaled) threshold, a change-point is flagged and localized
+        near the center or the end of the current window.
+        """
         v = 2
         self._buffer.append(observation)
         self._position += 1
@@ -97,6 +170,27 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
                 self._last_change_point = self._position - 1
 
     def _calculate_slope_entropy(self, time_series: npt.NDArray[np.float64]) -> float:
+        """
+        Compute slope entropy for the given window.
+
+        Parameters
+        ----------
+        time_series : ndarray of float, shape (N,)
+            Current rolling window.
+
+        Returns
+        -------
+        float
+            Base-2 entropy of the empirical distribution of slope patterns. Returns
+            ``0.0`` if the window is too short or if no patterns can be formed.
+
+        Notes
+        -----
+        - A slope pattern is formed by encoding the ``embedding_dim-1`` adjacent
+          differences inside each length-``embedding_dim`` subsequence.
+        - If ``normalize=True``, the entropy is divided by the maximum possible
+          (``log2(#observed_patterns)``) to yield a value in ``[0, 1]``.
+        """
         N = len(time_series)
         if self._embedding_dim > N:
             return 0.0
@@ -127,17 +221,39 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         return float(entropy)
 
     def _create_slope_pattern(self, subsequence: npt.NDArray[np.float64]) -> list[int]:
+        """
+        Encode a length-``embedding_dim`` subsequence into a slope pattern.
+
+        Parameters
+        ----------
+        subsequence : ndarray of float, shape (embedding_dim,)
+            Subsequence from the current window.
+
+        Returns
+        -------
+        list of int
+            A list of length ``embedding_dim-1`` with symbols in ``{-2, -1, 0, 1, 2}``.
+
+        Encoding
+        --------
+        For a slope ``d = x[i] - x[i-1]``:
+        - ``d >  gamma`` → ``2``  (steep positive)
+        - ``delta < d <= gamma`` → ``1``  (gentle positive)
+        - ``|d| <= delta`` → ``0``  (flat/ties)
+        - ``-gamma <= d < -delta`` → ``-1`` (gentle negative)
+        - ``d < -gamma`` → ``-2`` (steep negative)
+        """
         pattern = []
         for i in range(1, len(subsequence)):
             slope = subsequence[i] - subsequence[i - 1]
 
             if slope > self._gamma:
                 symbol = 2
-            elif slope > self._delta and slope <= self._gamma:
+            elif self._delta < slope <= self._gamma:
                 symbol = 1
             elif abs(slope) <= self._delta:
                 symbol = 0
-            elif slope < -self._delta and slope >= -self._gamma:
+            elif -self._gamma <= slope < -self._delta:
                 symbol = -1
             else:
                 symbol = -2
@@ -147,9 +263,25 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         return pattern
 
     def get_entropy_history(self) -> list[float]:
+        """
+        Get the history of computed slope-entropy values.
+
+        Returns
+        -------
+        list of float
+            A copy of the internal slope-entropy sequence evaluated at processed steps.
+        """
         return self._entropy_values.copy()
 
     def get_current_parameters(self) -> dict[str, Any]:
+        """
+        Get the current configuration of the detector.
+
+        Returns
+        -------
+        dict
+            Dictionary with the current settings and derived limits.
+        """
         return {
             "window_size": self._window_size,
             "embedding_dim": self._embedding_dim,
@@ -169,6 +301,27 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         threshold: Optional[float] = None,
         normalize: Optional[bool] = None,
     ) -> None:
+        """
+        Update detector parameters in-place.
+
+        Parameters
+        ----------
+        embedding_dim : int, optional
+            New subsequence length.
+        gamma : float, optional
+            New upper slope threshold.
+        delta : float, optional
+            New inner slope threshold (must remain strictly less than ``gamma``).
+        threshold : float, optional
+            New decision threshold for change detection.
+        normalize : bool, optional
+            Whether to normalize entropy to ``[0, 1]``.
+
+        Raises
+        ------
+        ValueError
+            If the updated ``delta`` is not strictly less than ``gamma``.
+        """
         if embedding_dim is not None:
             self._embedding_dim = embedding_dim
         if gamma is not None:
@@ -184,6 +337,15 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
             raise ValueError(f"delta ({self._delta}) must be less than gamma ({self._gamma})")
 
     def get_pattern_distribution(self) -> dict[tuple[int, ...], float]:
+        """
+        Estimate the probability distribution over slope patterns in the current window.
+
+        Returns
+        -------
+        dict
+            Mapping from pattern (tuple of ints) to its empirical probability.
+            Returns an empty dict if the buffer has fewer than ``window_size`` samples.
+        """
         if len(self._buffer) < self._window_size:
             return {}
 
@@ -205,6 +367,13 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         return pattern_probs
 
     def analyze_slope_characteristics(self) -> dict[str, Any]:
+        """
+        Compute descriptive statistics of slopes within the current window.
+
+        Returns
+        -------
+        dict
+        """
         if len(self._buffer) < self._window_size:
             return {}
 
@@ -232,6 +401,14 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         }
 
     def get_symbol_meanings(self) -> dict[int, str]:
+        """
+        Return a human-readable legend for the slope symbols.
+
+        Returns
+        -------
+        dict
+            Mapping from symbol to description.
+        """
         return {
             2: f"Steep positive slope (> {self._gamma})",
             1: f"Gentle positive slope ({self._delta} to {self._gamma})",
@@ -243,6 +420,26 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
     def demonstrate_encoding(
         self, sample_data: list[float]
     ) -> dict[str, Union[str, float, int, list[float], list[int], list[list[int]], dict[int, str]]]:
+        """
+        Demonstrate slope symbolization and pattern construction for a small sample.
+
+        Parameters
+        ----------
+        sample_data : list of float
+            Example sequence to encode. Must have length ≥ ``embedding_dim``.
+
+        Returns
+        -------
+        dict
+            Keys:
+            - ``original_data``: the input sequence,
+            - ``slopes``: first differences,
+            - ``symbols``: slope symbols for each difference,
+            - ``patterns``: list of slope patterns of length ``embedding_dim-1``,
+            - ``slope_entropy``: slope entropy over the sample,
+            - ``encoding_rules``: symbol legend.
+            If input is too short, returns ``{"error": "..."} ``.
+        """
         if len(sample_data) < self._embedding_dim:
             return {"error": "Sample data too short"}
 
@@ -253,11 +450,11 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         for slope in slopes:
             if slope > self._gamma:
                 symbols.append(2)
-            elif slope > self._delta and slope <= self._gamma:
+            elif self._delta < slope <= self._gamma:
                 symbols.append(1)
             elif abs(slope) <= self._delta:
                 symbols.append(0)
-            elif slope < -self._delta and slope >= -self._gamma:
+            elif -self._gamma <= slope < -self._delta:
                 symbols.append(-1)
             else:
                 symbols.append(-2)
@@ -278,6 +475,13 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         }
 
     def reset(self) -> None:
+        """
+        Clear internal state and buffered statistics.
+
+        Returns
+        -------
+        None
+        """
         self._buffer.clear()
         self._entropy_values.clear()
         self._position = 0
