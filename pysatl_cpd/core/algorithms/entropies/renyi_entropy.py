@@ -205,7 +205,7 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
 
         Parameters
         ----------
-        time_series : ndarray of float, shape (N,)
+        time_series : ndarray of float, shape (N, alpha)
             Values from the current rolling window.
 
         Returns
