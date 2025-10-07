@@ -40,33 +40,31 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
     """
     Online change-point detector based on Tsallis entropy S_q.
 
-    Parameters
-    ----------
-    window_size : int, default=100
-        Sliding window length used for entropy computation.
-    q_parameter : float, default=2.0
-        Entropic index q (q ≠ 1). Smaller q (< 1) emphasizes support/rare events;
-        larger q (> 1) emphasizes frequent events.
-    k_constant : float, default=1.0
-        Constant factor (usually k = 1 in normalized units).
-    threshold : float, default=0.1
-        Decision threshold for the detection rules.
-    num_bins : int, default=20
-        Number of histogram bins for discrete S_q estimation.
-    use_kde : bool, default=False
-        If True, compute continuous Tsallis via Gaussian KDE + numerical integration.
-        If False, use histogram-based discrete S_q.
-    normalize : bool, default=True
-        If True (discrete mode), normalize S_q by its theoretical maximum (uniform distribution
-        over the observed non-zero states).
-    multi_q : bool, default=False
-        If True, compute S_q for a set of q-values and combine them into one score.
+    :param window_size: Sliding window length used for entropy computation. Default: ``100``.
+    :type window_size: int
+    :param q_parameter: Entropic index q (q ≠ 1). Smaller q (< 1) emphasizes support/rare events;
+                        larger q (> 1) emphasizes frequent events. Default: ``2.0``.
+    :type q_parameter: float
+    :param k_constant: Constant factor (usually ``k = 1`` in normalized units). Default: ``1.0``.
+    :type k_constant: float
+    :param threshold: Decision threshold for the detection rules. Default: ``0.1``.
+    :type threshold: float
+    :param num_bins: Number of histogram bins for discrete S_q estimation. Default: ``20``.
+    :type num_bins: int
+    :param use_kde: If ``True``, compute continuous Tsallis via Gaussian KDE + numerical integration;
+                    if ``False``, use histogram-based discrete S_q. Default: ``False``.
+    :type use_kde: bool
+    :param normalize: If ``True`` (discrete mode), normalize S_q by its theoretical maximum
+                      (uniform distribution over the observed non-zero states). Default: ``True``.
+    :type normalize: bool
+    :param multi_q: If ``True``, compute S_q for a set of q-values and combine them into one score.
+                    Default: ``False``.
+    :type multi_q: bool
 
-    Notes
-    -----
-    - The detector processes observations in a streaming fashion.
-    - Change localization is returned as an approximate index near the center/quarter of the
-      current window depending on which rule was triggered.
+    . note::
+       - The detector processes observations in a streaming fashion.
+       - Change localization is returned as an approximate index near the center/quarter of the
+         current window depending on which rule was triggered.
     """
 
     def __init__(
@@ -114,15 +112,11 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Ingest a new observation (or a batch) and update the detection state.
 
-        Parameters
-        ----------
-        observation : float or ndarray of float
-            A single value or a 1-D array of values to process sequentially.
-
-        Returns
-        -------
-        bool
-            ``True`` if a change-point was flagged after processing the input, ``False`` otherwise.
+        :param observation: A single value or a 1-D array of values to process sequentially.
+        :type observation: float or numpy.ndarray
+        :return: ``True`` if a change-point was flagged after processing the input,
+                 ``False`` otherwise.
+        :rtype: bool
         """
         if isinstance(observation, np.ndarray):
             for obs in observation:
@@ -136,16 +130,11 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Process input and return the index of a detected change-point if present.
 
-        Parameters
-        ----------
-        observation : float or ndarray of float
-            A single value or a 1-D array of values to process.
-
-        Returns
-        -------
-        int or None
-            Estimated change-point index (0-based, relative to the processed stream),
-            or ``None`` if no change-point is detected.
+        :param observation: A single value or a 1-D array of values to process.
+        :type observation: float or numpy.ndarray
+        :return: Estimated change-point index (0-based, relative to the processed stream),
+                 or ``None`` if no change-point is detected.
+        :rtype: int or None
         """
         change_detected = self.detect(observation)
 
@@ -160,10 +149,8 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Process a single sample, update buffers and S_q, and run decision rules.
 
-        Parameters
-        ----------
-        observation : float
-            New sample from the stream.
+        :param observation: New sample from the stream.
+        :type observation: float
         """
         v1 = 2
         self._buffer.append(observation)
@@ -204,22 +191,16 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Compute Tsallis entropy S_q for the given window.
 
-        Parameters
-        ----------
-        time_series : ndarray of float, shape (N,)
-            Current rolling window.
-        q : float
-            Entropic index (q ≠ 1).
+        :param time_series: Current rolling window.
+        :type time_series: numpy.ndarray
+        :param q: Entropic index (q ≠ 1).
+        :type q: float
+        :return: Tsallis entropy value (possibly normalized). Returns ``0.0`` on degenerate inputs.
+        :rtype: float
 
-        Returns
-        -------
-        float
-            Tsallis entropy value (possibly normalized). Returns ``0.0`` on degenerate inputs.
-
-        Notes
-        -----
-        - If ``use_kde`` is True, use continuous definition via KDE + integration.
-        - Otherwise, compute discrete version via histogram probabilities.
+        . note::
+           - If ``use_kde`` is ``True``, use continuous definition via KDE + integration.
+           - Otherwise, compute the discrete version via histogram probabilities.
         """
         if self._use_kde:
             return self._calculate_continuous_tsallis_entropy(time_series, q)
@@ -230,17 +211,12 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Discrete Tsallis entropy using histogram probabilities.
 
-        Parameters
-        ----------
-        time_series : ndarray of float, shape (N,)
-            Current rolling window.
-        q : float
-            Entropic index.
-
-        Returns
-        -------
-        float
-            S_q for the discrete distribution in the window (optionally normalized).
+        :param time_series: Current rolling window.
+        :type time_series: numpy.ndarray
+        :param q: Entropic index.
+        :type q: float
+        :return: S_q for the discrete distribution in the window (optionally normalized).
+        :rtype: float
         """
         hist, _ = np.histogram(time_series, bins=self._num_bins, density=False)
         probabilities = hist / np.sum(hist)
@@ -268,17 +244,12 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Continuous Tsallis entropy using Gaussian KDE and numerical integration.
 
-        Parameters
-        ----------
-        time_series : ndarray of float, shape (N,)
-            Current rolling window.
-        q : float
-            Entropic index.
-
-        Returns
-        -------
-        float
-            Continuous S_q estimated from KDE. Falls back to discrete S_q on numerical errors.
+        :param time_series: Current rolling window.
+        :type time_series: numpy.ndarray
+        :param q: Entropic index.
+        :type q: float
+        :return: Continuous S_q estimated from KDE. Falls back to discrete S_q on numerical errors.
+        :rtype: float
         """
         try:
             kde = stats.gaussian_kde(time_series)
@@ -319,19 +290,14 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
 
     def _calculate_max_discrete_tsallis_entropy(self, n_states: int, q: float) -> float:
         """
-        Theoretical maximum of discrete S_q for a uniform distribution over n_states.
+        Theoretical maximum of discrete S_q for a uniform distribution over ``n_states``.
 
-        Parameters
-        ----------
-        n_states : int
-            Number of non-zero-probability states in the window.
-        q : float
-            Entropic index.
-
-        Returns
-        -------
-        float
-            Maximal S_q for the given n_states (k * ln(n_states) in Shannon limit).
+        :param n_states: Number of non-zero-probability states in the window.
+        :type n_states: int
+        :param q: Entropic index.
+        :type q: float
+        :return: Maximal S_q for the given ``n_states`` (``k * ln(n_states)`` in the Shannon limit).
+        :rtype: float
         """
         v = 1e-10
         if n_states <= 1:
@@ -348,15 +314,10 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Combine multiple S_q values into a single score (simple weighted average).
 
-        Parameters
-        ----------
-        entropies : dict[float, float]
-            Map {q: S_q(current window)}.
-
-        Returns
-        -------
-        float
-            Aggregated entropy score across q-values.
+        :param entropies: Mapping ``{q: S_q(current window)}``.
+        :type entropies: dict[float, float]
+        :return: Aggregated entropy score across q-values.
+        :rtype: float
         """
         weights = {}
         for q in entropies:
@@ -373,9 +334,9 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Trend test on recent S_q via linear regression slope.
 
-        Notes
-        -----
-        - Uses last 10 values; if |slope| > 0.5 * threshold, flags a change and localizes near the tail.
+        . note::
+           Uses last 10 values; if ``|slope| > 0.5 * threshold``, flags a change and
+           localizes near the tail.
         """
         v = 10
         if len(self._entropy_values) >= v:
@@ -390,10 +351,9 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Variance-shift test between two recent halves of the S_q history.
 
-        Notes
-        -----
-        - Compares var(last 10 values) vs var(previous 10 values);
-          if |Δvar| > 0.3 * threshold, flags a change near the midpoint.
+        . note::
+           Compares ``var(last 10)`` vs ``var(previous 10)``; if ``|Δvar| > 0.3 * threshold``,
+           flags a change near the midpoint.
         """
         v = 20
         if len(self._entropy_values) >= v:
@@ -410,10 +370,9 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Majority-vote rule across q-values based on last-step S_q differences.
 
-        Notes
-        -----
-        - For each q, if |S_q(t) - S_q(t-1)| > 0.7 * threshold, that q votes for a change.
-        - If votes ≥ half + 1, flag a change near the tail.
+        . note::
+           For each ``q``, if ``|S_q(t) - S_q(t-1)| > 0.7 * threshold``, that ``q`` votes for a change.
+           If votes ≥ half + 1, flag a change near the tail.
         """
         if not self._multi_q:
             return
@@ -436,21 +395,17 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Get the history of aggregated Tsallis entropy values (single- or multi-q).
 
-        Returns
-        -------
-        list of float
-            A copy of the internal S_q sequence evaluated at processed steps.
+        :return: A copy of the internal S_q sequence evaluated at processed steps.
+        :rtype: list[float]
         """
         return self._entropy_values.copy()
 
     def get_multi_q_history(self) -> dict[float, list[float]]:
         """
-        Get the history of Tsallis entropy values for each q (only in multi-q mode).
+        Get the history of Tsallis entropy values for each ``q`` (only in multi-q mode).
 
-        Returns
-        -------
-        dict[float, list[float]]
-            Mapping {q: list of S_q values over time}.
+        :return: Mapping ``{q: list of S_q values over time}``.
+        :rtype: dict[float, list[float]]
         """
         return {q: values.copy() for q, values in self._multi_entropy_values.items()}
 
@@ -458,11 +413,9 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Return current configuration and important internal parameters.
 
-        Returns
-        -------
-        dict
-            Dictionary with keys: window_size, q_parameter, k_constant, threshold,
-            num_bins, use_kde, normalize, multi_q, q_values.
+        :return: Dictionary with keys: ``window_size``, ``q_parameter``, ``k_constant``, ``threshold``,
+                 ``num_bins``, ``use_kde``, ``normalize``, ``multi_q``, ``q_values``.
+        :rtype: dict
         """
         return {
             "window_size": self._window_size,
@@ -489,26 +442,25 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Update detector hyperparameters in place.
 
-        Parameters
-        ----------
-        q_parameter : float or None, optional
-            New entropic index q (q ≠ 1). Ignored in multi-q mode.
-        k_constant : float or None, optional
-            New k constant (> 0).
-        threshold : float or None, optional
-            New decision threshold.
-        num_bins : int or None, optional
-            New number of histogram bins (> 1).
-        use_kde : bool or None, optional
-            Toggle continuous KDE-based S_q.
-        normalize : bool or None, optional
-            Toggle normalization (discrete mode).
-        multi_q : bool or None, optional
-            Toggle multi-q mode; resets per-q histories if turned on.
+        :param q_parameter: New entropic index q (q ≠ 1). Ignored in multi-q mode.
+        :type q_parameter: float, optional
+        :param k_constant: New k constant (> 0).
+        :type k_constant: float, optional
+        :param threshold: New decision threshold.
+        :type threshold: float, optional
+        :param num_bins: New number of histogram bins (> 1).
+        :type num_bins: int, optional
+        :param use_kde: Toggle continuous KDE-based S_q.
+        :type use_kde: bool, optional
+        :param normalize: Toggle normalization (discrete mode).
+        :type normalize: bool, optional
+        :param multi_q: Toggle multi-q mode; resets per-q histories if turned on.
+        :type multi_q: bool, optional
+        :return: ``None``.
+        :rtype: None
 
-        Returns
-        -------
-        None
+        :raises ValueError: If invalid values are provided (e.g., ``q=1`` or non-positive
+                            constants / bins).
         """
 
         def set_q_param(q: float) -> None:
@@ -553,14 +505,14 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Evaluate S_q sensitivity to a set of q-values on the current window.
 
-        Returns
-        -------
-        dict
-            Keys:
-            - 'q_entropies': {q: S_q(current window)}
-            - 'entropy_ratios': ratios vs base q=2.0 (if defined)
-            - 'most_sensitive_q': argmax |S_q|
-            - 'entropy_variance_across_q': variance of S_q over tested q
+        :return: Dictionary with keys:
+
+                 - ``q_entropies``: ``{q: S_q(current window)}``
+                 - ``entropy_ratios``: ratios vs base ``q=2.0`` (if defined)
+                 - ``most_sensitive_q``: argmax ``|S_q|``
+                 - ``entropy_variance_across_q``: variance of ``S_q`` over tested ``q``
+
+        :rtype: dict
         """
         if len(self._buffer) < self._window_size:
             return {}
@@ -595,10 +547,8 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Compute auxiliary complexity metrics from S_q at several regimes.
 
-        Returns
-        -------
-        dict
-            Includes sub-/extensive/super-extensive S_q, their ratio, and basic window stats.
+        :return: Includes sub-/extensive/super-extensive S_q, their ratio, and basic window stats.
+        :rtype: dict
         """
         if len(self._buffer) < self._window_size:
             return {}
@@ -623,9 +573,8 @@ class TsallisEntropyAlgorithm(OnlineAlgorithm):
         """
         Clear internal state and buffered statistics.
 
-        Returns
-        -------
-        None
+        :return: ``None``.
+        :rtype: None
         """
         self._buffer.clear()
         self._entropy_values.clear()

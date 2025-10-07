@@ -5,17 +5,20 @@ The algorithm maintains a rolling window over a univariate time series, computes
 Approximate Entropy for the current window, and raises a change-point signal when
 the short-term dynamics of ApEn indicate a regime shift.
 
-ApEn is computed as::
+ApEn is computed as:
 
-    ApEn(m, r, N) = phi(m, r) - phi(m+1, r)
+. math::
+
+    ApEn(m, r, N) = \\phi(m, r) - \\phi(m+1, r)
 
 where ``m`` is the embedding (pattern) length and ``r`` is a tolerance radius
 (often expressed as a fraction of the windowed standard deviation).
 
 This implementation supports a fixed ``r`` or an adaptive one via ``r_factor * std(window)``.
 A detection is triggered when either:
-1) the absolute change in consecutive ApEn values exceeds ``threshold``, or
-2) the short-term variance of ApEn, normalized by its mean magnitude, exceeds ``threshold``.
+
+1. The absolute change in consecutive ApEn values exceeds ``threshold``.
+2. The short-term variance of ApEn, normalized by its mean magnitude, exceeds ``threshold``.
 """
 
 __author__ = "Kirill Gribanov"
@@ -35,25 +38,23 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
     """
     Online change-point detector based on Approximate Entropy (ApEn).
 
-    Parameters
-    ----------
-    window_size : int, default=100
-        Sliding window length used to compute ApEn.
-    m : int, default=2
-        Embedding (pattern) length for ApEn.
-    r : float or None, default=None
-        Fixed tolerance radius. If ``None``, an adaptive radius is used via ``r_factor``.
-    r_factor : float, default=0.2
-        Multiplicative factor for adaptive radius, i.e. ``r = r_factor * std(window)`` when ``r`` is ``None``.
-    threshold : float, default=0.3
-        Decision threshold used in both the first-order ApEn difference test and the
-        normalized short-term variance test.
+    :param window_size: Sliding window length used to compute ApEn. Default: ``100``.
+    :type window_size: int
+    :param m: Embedding (pattern) length for ApEn. Default: ``2``.
+    :type m: int
+    :param r: Fixed tolerance radius. If ``None``, an adaptive radius is used via ``r_factor``.
+    :type r: float or None
+    :param r_factor: Multiplicative factor for adaptive radius,
+    i.e. ``r = r_factor * std(window)`` when ``r`` is ``None``.
+    :type r_factor: float
+    :param threshold: Decision threshold used in both the first-order ApEn difference test and
+                      the normalized short-term variance test. Default: ``0.3``.
+    :type threshold: float
 
-    Notes
-    -----
-    - The detector processes observations in a streaming fashion.
-    - Change localization is returned as an approximate index around the center (or quarter)
-      of the current window depending on which criterion was triggered.
+    . note::
+       - The detector processes observations in a streaming fashion.
+       - Change localization is returned as an approximate index around the center (or quarter)
+         of the current window depending on which criterion was triggered.
     """
 
     def __init__(
@@ -79,15 +80,10 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Ingest a new observation (or a batch) and update the internal detection state.
 
-        Parameters
-        ----------
-        observation : float or ndarray of float
-            A single value or a 1-D array of values to process sequentially.
-
-        Returns
-        -------
-        bool
-            ``True`` if a change-point was flagged after processing the input, ``False`` otherwise.
+        :param observation: A single value or a 1-D array of values to process sequentially.
+        :type observation: float or numpy.ndarray
+        :return: ``True`` if a change-point was flagged after processing the input, ``False`` otherwise.
+        :rtype: bool
         """
         if isinstance(observation, np.ndarray):
             for obs in observation:
@@ -101,16 +97,11 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Ingest input and return the index of a detected change-point if present.
 
-        Parameters
-        ----------
-        observation : float or ndarray of float
-            A single value or a 1-D array of values to process.
-
-        Returns
-        -------
-        int or None
-            Estimated change-point index (0-based, relative to the processed stream),
-            or ``None`` if no change-point is detected.
+        :param observation: A single value or a 1-D array of values to process.
+        :type observation: float or numpy.ndarray
+        :return: Estimated change-point index (0-based, relative to the processed stream),
+                 or ``None`` if no change-point is detected.
+        :rtype: int or None
         """
         change_detected = self.detect(observation)
 
@@ -125,14 +116,8 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Process a single new observation and update the internal ApEn statistics.
 
-        Parameters
-        ----------
-        observation : float
-            New value to be appended to the rolling buffer.
-
-        Returns
-        -------
-        None
+        :param observation: New value to be appended to the rolling buffer.
+        :type observation: float
         """
         v = 2
         self._buffer.append(observation)
@@ -166,20 +151,14 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Compute Approximate Entropy for the given window.
 
-        Parameters
-        ----------
-        time_series : ndarray of float, shape (N,)
-            Current rolling window.
+        :param time_series: Current rolling window.
+        :type time_series: numpy.ndarray
+        :return: The computed ApEn value. Returns ``0.0`` when the input is too short or degenerate.
+        :rtype: float
 
-        Returns
-        -------
-        float
-            The computed ApEn value. Returns ``0.0`` when the input is too short or degenerate.
-
-        Notes
-        -----
-        - If ``r`` is not provided, it is derived as ``r_factor * std(time_series)``.
-        - When the window variance is zero, ``0.0`` is returned to avoid division by zero.
+        . note::
+           - If ``r`` is not provided, it is derived as ``r_factor * std(time_series)``.
+           - When the window variance is zero, ``0.0`` is returned to avoid division by zero.
         """
         N = len(time_series)
 
@@ -204,24 +183,18 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Compute the auxiliary ``phi(m, r)`` term for ApEn.
 
-        Parameters
-        ----------
-        time_series : ndarray of float, shape (N,)
-            Current rolling window.
-        m : int
-            Embedding length.
-        r : float
-            Tolerance radius.
+        :param time_series: Current rolling window.
+        :type time_series: numpy.ndarray
+        :param m: Embedding length.
+        :type m: int
+        :param r: Tolerance radius.
+        :type r: float
+        :return: The average log of match proportions across all m-patterns in the window.
+        :rtype: float
 
-        Returns
-        -------
-        float
-            The average log of match proportions across all m-patterns in the window.
-
-        Notes
-        -----
-        - Uses Chebyshev (max-abs) distance between m-length vectors.
-        - Protects ``log(0)`` by adding a small epsilon.
+        . note::
+           - Uses Chebyshev (max-abs) distance between m-length vectors.
+           - Protects ``log(0)`` by adding a small epsilon.
         """
         N = len(time_series)
         n = N - m + 1
@@ -233,17 +206,14 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
 
         for i in range(n):
             xi = time_series[i : i + m]
-
             matches = 0
             for j in range(n):
                 xj = time_series[j : j + m]
                 distance = self._max_distance(xi, xj)
-
                 if distance <= r:
                     matches += 1
 
             C_i_m = matches / n
-
             if C_i_m > 0:
                 log_sum += np.log(C_i_m)
             else:
@@ -256,15 +226,12 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Compute the Chebyshev (L-infinity) distance between two vectors.
 
-        Parameters
-        ----------
-        x, y : ndarray of float, shape (m,)
-            Two m-length vectors.
-
-        Returns
-        -------
-        float
-            ``max(|x - y|)``.
+        :param x: First m-length vector.
+        :type x: numpy.ndarray
+        :param y: Second m-length vector.
+        :type y: numpy.ndarray
+        :return: Maximum absolute difference between corresponding elements.
+        :rtype: float
         """
         return float(np.max(np.abs(x - y)))
 
@@ -272,15 +239,12 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Compute the Euclidean (L2) distance between two vectors.
 
-        Parameters
-        ----------
-        x, y : ndarray of float, shape (m,)
-            Two m-length vectors.
-
-        Returns
-        -------
-        float
-            ``sqrt(sum((x - y)^2))``.
+        :param x: First m-length vector.
+        :type x: numpy.ndarray
+        :param y: Second m-length vector.
+        :type y: numpy.ndarray
+        :return: Euclidean distance, defined as ``sqrt(sum((x - y)^2))``.
+        :rtype: float
         """
         return float(np.sqrt(np.sum((x - y) ** 2)))
 
@@ -288,10 +252,8 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Get the history of computed Approximate Entropy values.
 
-        Returns
-        -------
-        list of float
-            A copy of the internal ApEn sequence evaluated at processed steps.
+        :return: A copy of the internal ApEn sequence evaluated at processed steps.
+        :rtype: list[float]
         """
         return self._entropy_values.copy()
 
@@ -299,12 +261,11 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Get the current tolerance radius ``r``.
 
-        Returns
-        -------
-        float or None
+        :return:
             - If a fixed ``r`` was provided, it is returned.
             - If adaptive, returns ``r_factor * std(current_window)`` if available.
             - Otherwise, ``None``.
+        :rtype: float or None
         """
         if self._r is not None:
             return self._r
@@ -320,10 +281,8 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Get the current embedding length ``m``.
 
-        Returns
-        -------
-        int
-            The pattern length parameter used for ApEn.
+        :return: The pattern length parameter used for ApEn.
+        :rtype: int
         """
         return self._m
 
@@ -337,20 +296,14 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Update detector hyperparameters in place.
 
-        Parameters
-        ----------
-        m : int or None, optional
-            New embedding length. If ``None``, unchanged.
-        r : float or None, optional
-            New fixed tolerance. If ``None``, unchanged.
-        r_factor : float or None, optional
-            New adaptive multiplier. If ``None``, unchanged.
-        threshold : float or None, optional
-            New decision threshold. If ``None``, unchanged.
-
-        Returns
-        -------
-        None
+        :param m: New embedding length. If ``None``, unchanged.
+        :type m: int or None
+        :param r: New fixed tolerance. If ``None``, unchanged.
+        :type r: float or None
+        :param r_factor: New adaptive multiplier. If ``None``, unchanged.
+        :type r_factor: float or None
+        :param threshold: New decision threshold. If ``None``, unchanged.
+        :type threshold: float or None
         """
         if m is not None:
             self._m = m
@@ -365,9 +318,8 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         Clear internal state and buffered statistics.
 
-        Returns
-        -------
-        None
+        :return: ``None``
+        :rtype: None
         """
         self._buffer.clear()
         self._entropy_values.clear()

@@ -24,27 +24,24 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
     """
     Online change-point detector based on Rényi entropy.
 
-    Parameters
-    ----------
-    window_size : int, default=100
-        Sliding window length used to compute H.
-    alpha : float, default=0.5
-        Rényi order . Must be positive and not equal to 1.
-        - Smaller alpha (< 1) emphasizes support size / rare events.
-        - Larger alpha (> 1) emphasizes frequent events.
-    bins : int, default=10
-        Number of histogram bins used to estimate probabilities in the current window.
-        Bin edges are determined from running global min/max.
-    threshold : float, default=0.3
-        Decision threshold used by both:
-        - consecutive-entropy-difference test; and
-        - short-term variance test (with an internal scaling).
+    :param window_size: Sliding window length used to compute :math:`H`. Default: ``100``.
+    :type window_size: int
+    :param alpha: Rényi order. Must be positive and not equal to 1. Smaller ``alpha < 1``
+                  emphasizes support size / rare events; larger ``alpha > 1`` emphasizes
+                  frequent events. Default: ``0.5``.
+    :type alpha: float
+    :param bins: Number of histogram bins used to estimate probabilities in the current window.
+                 Bin edges are determined from running global min/max. Default: ``10``.
+    :type bins: int
+    :param threshold: Decision threshold used by both (i) consecutive-entropy-difference test
+                      and (ii) short-term variance test (with an internal scaling).
+                      Default: ``0.3``.
+    :type threshold: float
 
-    Notes
-    -----
-    - The detector processes observations in a streaming fashion.
-    - Change localization is returned as an approximate index near the center
-      (or quarter) of the current window depending on which criterion was triggered.
+    . note::
+       - The detector processes observations in a streaming fashion.
+       - Change localization is returned as an approximate index near the center
+         (or quarter) of the current window depending on which criterion was triggered.
     """
 
     def __init__(
@@ -75,15 +72,11 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         """
         Ingest a new observation (or a batch) and update the detection state.
 
-        Parameters
-        ----------
-        observation : float or ndarray of float
-            A single value or a 1-D array of values to process sequentially.
-
-        Returns
-        -------
-        bool
-            ``True`` if a change-point was flagged after processing the input, ``False`` otherwise.
+        :param observation: A single value or a 1-D array of values to process sequentially.
+        :type observation: float or numpy.ndarray
+        :return: ``True`` if a change-point was flagged after processing the input,
+                 ``False`` otherwise.
+        :rtype: bool
         """
         if isinstance(observation, np.ndarray):
             for obs in observation:
@@ -97,16 +90,11 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         """
         Process input and return the index of a detected change-point if present.
 
-        Parameters
-        ----------
-        observation : float or ndarray of float
-            A single value or a 1-D array of values to process.
-
-        Returns
-        -------
-        int or None
-            Estimated change-point index (0-based, relative to the processed stream),
-            or ``None`` if no change-point is detected.
+        :param observation: A single value or a 1-D array of values to process.
+        :type observation: float or numpy.ndarray
+        :return: Estimated change-point index (0-based, relative to the processed stream),
+                 or ``None`` if no change-point is detected.
+        :rtype: int or None
         """
         change_detected = self.detect(observation)
 
@@ -121,10 +109,8 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         """
         Process a single value, update buffers and Rényi entropy, and run decision rules.
 
-        Parameters
-        ----------
-        observation : float
-            New sample from the stream.
+        :param observation: New sample from the stream.
+        :type observation: float
         """
         v = 2  # minimal history for first-difference test
         self._buffer.append(observation)
@@ -161,21 +147,16 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         """
         Compute Rényi entropy for the given window using histogram probabilities.
 
-        Parameters
-        ----------
-        time_series : ndarray of float, shape (N,)
-            The current rolling window.
+        :param time_series: The current rolling window.
+        :type time_series: numpy.ndarray
+        :return: The computed Rényi entropy (natural logarithm base). Returns ``0.0`` when
+                 probabilities are degenerate (e.g., all mass in a single bin) or inputs are too short.
+        :rtype: float
 
-        Returns
-        -------
-        float
-            The computed Rényi entropy (natural logarithm base). Returns ``0.0`` when
-            probabilities are degenerate (e.g., all mass in a single bin) or inputs are too short.
-
-        Notes
-        -----
-        - Uses ``_compute_probabilities`` with global min/max to form fixed edges.
-        - Supports  alpha=0 and  alpha→∞ special cases;  alpha=1 (Shannon) is excluded by input validation.
+        . note::
+           - Uses :meth:`_compute_probabilities` with global min/max to form fixed edges.
+           - Supports the special cases :math:`\\alpha = 0` and :math:`\\alpha \\to \\infty`;
+             :math:`\\alpha = 1` (Shannon) is excluded by input validation.
         """
         if len(time_series) == 0:
             return 0.0
@@ -203,20 +184,14 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         """
         Estimate a discrete probability distribution in the current window via histogramming.
 
-        Parameters
-        ----------
-        time_series : ndarray of float, shape (N, alpha)
-            Values from the current rolling window.
+        :param time_series: Values from the current rolling window.
+        :type time_series: numpy.ndarray
+        :return: Probability of each bin (summing to 1), or an empty list if binning is not possible.
+        :rtype: list[float]
 
-        Returns
-        -------
-        list of float
-            Probability of each bin (summing to 1), or an empty list if binning is not possible.
-
-        Notes
-        -----
-        - Uses ``self._global_min`` and ``self._global_max`` to define ``bins+1`` edges.
-        - If global range collapses to a point, returns ``[1.0]``.
+        . notes::
+           - Uses ``self._global_min`` and ``self._global_max`` to define ``bins + 1`` edges.
+           - If global range collapses to a point, returns ``[1.0]``.
         """
         if self._global_min is None or self._global_max is None:
             return []
@@ -231,7 +206,7 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         total_count = len(time_series)
 
         probabilities: list[float] = []
-        # Only bins 1..bins correspond to intervals; bin 0 or bins+1 catch out-of-range
+        # Only bins 1.bins correspond to intervals; bin 0 or bins+1 catch out-of-range
         for i in range(1, len(bin_edges)):
             key = np.int64(i)
             count = bin_counts.get(key, 0)
@@ -244,10 +219,8 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         """
         Get the history of computed Rényi entropy values.
 
-        Returns
-        -------
-        list of float
-            A copy of the internal entropy sequence evaluated at processed steps.
+        :return: A copy of the internal entropy sequence evaluated at processed steps.
+        :rtype: list[float]
         """
         return self._entropy_values.copy()
 
@@ -255,9 +228,8 @@ class RenyiEntropyAlgorithm(OnlineAlgorithm):
         """
         Clear internal state and buffered statistics.
 
-        Returns
-        -------
-        None
+        :return: ``None``.
+        :rtype: None
         """
         self._buffer.clear()
         self._entropy_values.clear()

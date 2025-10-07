@@ -5,11 +5,14 @@ This detector maintains a rolling window over a univariate time series, computes
 Sample Entropy of the current window, and emits a change-point when short-term
 fluctuations in SampEn indicate a regime shift.
 
-SampEn is computed as::
+Sample Entropy is defined as:
 
-    SampEn(m, r, N) = -log( A / B )
+. math::
+
+   \\mathrm{SampEn}(m, r, N) = -\\log\\left(\frac{A}{B}\right)
 
 where:
+
 - ``m`` is the embedding (pattern) length,
 - ``r`` is the tolerance radius (often a fraction of the windowed standard deviation),
 - ``B`` is the number of matching pairs of m-length patterns under tolerance ``r``,
@@ -17,8 +20,9 @@ where:
 
 This implementation supports a fixed ``r`` or an adaptive one via ``r_factor * std(window)``.
 A detection is triggered when either:
-1) the absolute change between consecutive SampEn values exceeds ``threshold``, or
-2) the short-term variance of recent SampEn values, normalized by their mean, exceeds ``threshold``.
+
+1. The absolute change between consecutive SampEn values exceeds ``threshold``; or
+2. The short-term variance of recent SampEn values, normalized by their mean, exceeds ``threshold``.
 """
 
 __author__ = "Kirill Gribanov"
@@ -38,25 +42,23 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
     """
     Online change-point detector based on Sample Entropy (SampEn).
 
-    Parameters
-    ----------
-    window_size : int, default=100
-        Sliding window length used to compute SampEn.
-    m : int, default=2
-        Embedding (pattern) length.
-    r : float or None, default=None
-        Fixed tolerance radius. If ``None``, an adaptive radius is used via ``r_factor``.
-    r_factor : float, default=0.2
-        Multiplicative factor for adaptive radius, i.e. ``r = r_factor * std(window)`` when ``r`` is ``None``.
-    threshold : float, default=0.5
-        Decision threshold used in both the first-order SampEn difference test and the
-        normalized short-term variance test.
+    :param window_size: Sliding window length used to compute SampEn. Default: ``100``.
+    :type window_size: int
+    :param m: Embedding (pattern) length. Default: ``2``.
+    :type m: int
+    :param r: Fixed tolerance radius. If ``None``, an adaptive radius is used via ``r_factor``. Default: ``None``.
+    :type r: float or None
+    :param r_factor: Multiplicative factor for adaptive radius,
+     i.e. ``r = r_factor * std(window)`` when ``r`` is ``None``. Default: ``0.2``.
+    :type r_factor: float
+    :param threshold: Decision threshold used in both the first-order
+    SampEn difference test and the normalized short-term variance test. Default: ``0.5``.
+    :type threshold: float
 
-    Notes
-    -----
-    - The detector processes observations in a streaming fashion.
-    - Change localization is returned as an approximate index around the center (or quarter)
-      of the current window depending on which criterion was triggered.
+    . note::
+       - The detector processes observations in a streaming fashion.
+       - Change localization is approximate and centered near the middle (or quarter)
+         of the current window depending on which criterion was triggered.
     """
 
     def __init__(
@@ -82,15 +84,10 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         """
         Ingest a new observation (or a batch) and update the internal detection state.
 
-        Parameters
-        ----------
-        observation : float or ndarray of float
-            A single value or a 1-D array of values to process sequentially.
-
-        Returns
-        -------
-        bool
-            ``True`` if a change-point was flagged after processing the input, ``False`` otherwise.
+        :param observation: A single value or a 1-D array of values to process sequentially.
+        :type observation: float or numpy.ndarray
+        :return: ``True`` if a change-point was flagged after processing the input, ``False`` otherwise.
+        :rtype: bool
         """
         if isinstance(observation, np.ndarray):
             for obs in observation:
@@ -104,16 +101,11 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         """
         Ingest input and return the index of a detected change-point if present.
 
-        Parameters
-        ----------
-        observation : float or ndarray of float
-            A single value or a 1-D array of values to process.
-
-        Returns
-        -------
-        int or None
-            Estimated change-point index (0-based, relative to the processed stream),
-            or ``None`` if no change-point is detected.
+        :param observation: A single value or a 1-D array of values to process.
+        :type observation: float or numpy.ndarray
+        :return: Estimated change-point index (0-based, relative to the processed stream),
+                 or ``None`` if no change-point is detected.
+        :rtype: int or None
         """
         change_detected = self.detect(observation)
 
@@ -128,14 +120,8 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         """
         Process a single new observation and update the internal SampEn statistics.
 
-        Parameters
-        ----------
-        observation : float
-            New value to be appended to the rolling buffer.
-
-        Returns
-        -------
-        None
+        :param observation: New value to be appended to the rolling buffer.
+        :type observation: float
         """
         v = 3
         self._buffer.append(observation)
@@ -182,21 +168,15 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         """
         Compute Sample Entropy for the given window.
 
-        Parameters
-        ----------
-        time_series : ndarray of float, shape (N,)
-            Current rolling window.
+        :param time_series: Current rolling window.
+        :type time_series: numpy.ndarray
+        :return: The computed SampEn value. Returns ``inf`` when the input is too short or
+                 when there are no matches (degenerate case).
+        :rtype: float
 
-        Returns
-        -------
-        float
-            The computed SampEn value. Returns ``inf`` when the input is too short or
-            when there are no matches (degenerate case).
-
-        Notes
-        -----
-        - If ``r`` is not provided, it is derived as ``r_factor * std(time_series)``.
-        - When the window variance is zero, ``inf`` is returned to reflect undefined entropy.
+        . note::
+           - If ``r`` is not provided, it is derived as ``r_factor * std(time_series)``.
+           - When the window variance is zero, ``inf`` is returned to reflect undefined entropy.
         """
         N = len(time_series)
         if self._m + 1 > N:
@@ -223,19 +203,14 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         """
         Count the number of matching pairs of patterns under Chebyshev tolerance.
 
-        Parameters
-        ----------
-        time_series : ndarray of float, shape (N,)
-            Current rolling window.
-        m : int
-            Embedding length.
-        r : float
-            Tolerance radius.
-
-        Returns
-        -------
-        int
-            Number of unordered matching pairs among m-length sub-sequences.
+        :param time_series: Current rolling window.
+        :type time_series: numpy.ndarray
+        :param m: Embedding length.
+        :type m: int
+        :param r: Tolerance radius.
+        :type r: float
+        :return: Number of unordered matching pairs among m-length sub-sequences.
+        :rtype: int
         """
         N = len(time_series)
         matches = 0
@@ -254,15 +229,12 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         """
         Compute the Chebyshev (L-infinity) distance between two vectors.
 
-        Parameters
-        ----------
-        x, y : ndarray of float, shape (m,)
-            Two m-length vectors.
-
-        Returns
-        -------
-        float
-            ``max(|x - y|)``.
+        :param x: First m-length vector.
+        :param y: Second m-length vector.
+        :type x: numpy.ndarray
+        :type y: numpy.ndarray
+        :return: Maximum absolute distance.
+        :rtype: float
         """
         return float(np.max(np.abs(x - y)))
 
@@ -270,15 +242,12 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         """
         Compute the Euclidean (L2) distance between two vectors.
 
-        Parameters
-        ----------
-        x, y : ndarray of float, shape (m,)
-            Two m-length vectors.
-
-        Returns
-        -------
-        float
-            ``sqrt(sum((x - y)^2))``.
+        :param x: First m-length vector.
+        :param y: Second m-length vector.
+        :type x: numpy.ndarray
+        :type y: numpy.ndarray
+        :return: Euclidean distance value.
+        :rtype: float
         """
         return float(np.sqrt(np.sum((x - y) ** 2)))
 
@@ -286,10 +255,8 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         """
         Get the history of computed Sample Entropy values.
 
-        Returns
-        -------
-        list of float
-            A copy of the internal SampEn sequence evaluated at processed steps.
+        :return: A copy of the internal SampEn sequence evaluated at processed steps.
+        :rtype: list[float]
         """
         return self._entropy_values.copy()
 
@@ -297,12 +264,11 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         """
         Get the current tolerance radius ``r``.
 
-        Returns
-        -------
-        float or None
-            - If a fixed ``r`` was provided, it is returned.
-            - If adaptive, returns ``r_factor * std(current_window)`` if available.
-            - Otherwise, ``None``.
+        :return: The current tolerance radius.
+                 - If a fixed ``r`` was provided, it is returned.
+                 - If adaptive, returns ``r_factor * std(current_window)`` if available.
+                 - Otherwise, ``None``.
+        :rtype: float or None
         """
         if self._r is not None:
             return self._r
@@ -318,9 +284,8 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         """
         Clear internal state and buffered statistics.
 
-        Returns
-        -------
-        None
+        :return: ``None``.
+        :rtype: None
         """
         self._buffer.clear()
         self._entropy_values.clear()
