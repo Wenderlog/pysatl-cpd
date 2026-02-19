@@ -91,7 +91,7 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
         self._reference_buffer: deque[float] = deque(maxlen=self._reference_window_size)
         self._current_buffer: deque[float] = deque(maxlen=self._window_size)
 
-        self._reference_array: Optional[np.ndarray] = None
+        self._reference_array: Optional[npt.NDArray[np.float64]] = None
 
         self._kl_values: deque[float] = deque(maxlen=200)
 
@@ -182,7 +182,7 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
                 self._last_change_point = self._position - self._window_size // 4
                 self._update_reference_distribution()
 
-    def _calculate_kl_divergence(self, ref_data: np.ndarray, curr_data: np.ndarray) -> float:
+    def _calculate_kl_divergence(self, ref_data: npt.NDArray[np.float64], curr_data: npt.NDArray[np.float64]) -> float:
         """
         Compute KL divergence between reference and current windows.
 
@@ -194,7 +194,9 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
         else:
             return self._calculate_kl_divergence_histogram(ref_data, curr_data)
 
-    def _calculate_kl_divergence_histogram(self, ref_data: np.ndarray, curr_data: np.ndarray) -> float:
+    def _calculate_kl_divergence_histogram(
+        self, ref_data: npt.NDArray[np.float64], curr_data: npt.NDArray[np.float64]
+    ) -> float:
         """
         Compute KL divergence using histogram binning.
 
@@ -231,7 +233,9 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
 
         return float(kl_pq)
 
-    def _calculate_kl_divergence_kde(self, ref_data: np.ndarray, curr_data: np.ndarray) -> float:
+    def _calculate_kl_divergence_kde(
+        self, ref_data: npt.NDArray[np.float64], curr_data: npt.NDArray[np.float64]
+    ) -> float:
         """
         Compute KL divergence using Gaussian KDE estimates.
 
@@ -392,6 +396,9 @@ class KLDivergenceAlgorithm(OnlineAlgorithm):
                  - ``quantile_differences``
         :rtype: dict
         """
+        if self._reference_array is None:
+            return {}
+
         comparison = self.get_distribution_comparison()
         if not comparison:
             return {}

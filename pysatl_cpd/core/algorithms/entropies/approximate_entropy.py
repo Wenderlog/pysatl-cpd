@@ -122,70 +122,66 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
 
     def _process_single_observation(self, observation: float) -> None:
         """
-        Process a single new observation and update the internal ApEn statistics.
+        Process a single new observation and update the internal SampEn statistics.
 
         :param observation: New value to be appended to the rolling buffer.
         :type observation: float
         """
+        self._position += 1
+
         if len(self._buffer) >= self._window_size // 2:
             current_mean = np.mean(self._buffer)
             if abs(observation - current_mean) > self._anomaly_threshold:
                 self._last_change_point = self._position
 
         self._buffer.append(observation)
-        self._position += 1
 
-        min_required = self._window_size
-        if len(self._buffer) < min_required:
+        if len(self._buffer) < self._window_size:
             return
 
         current_window = np.fromiter(self._buffer, dtype=float)
-        if np.std(current_window) == 0:
-            current_entropy = 0.0
-        else:
-            current_entropy = self._calculate_approximate_entropy_vectorized(current_window)
+        current_entropy = self._calculate_approximate_entropy_vectorized(current_window)
 
         if np.isinf(current_entropy) or np.isnan(current_entropy):
-            current_entropy = 0.0
+            current_entropy = float("inf")
 
-        if len(self._entropy_values) > 0:
-            entropy_diff = abs(current_entropy - self._entropy_values[-1])
+        if len(self._entropy_values) >= 1:
+            prev_entropy = self._entropy_values[-1]
+
+            if np.isinf(prev_entropy) and np.isinf(current_entropy):
+                entropy_diff = 0.0
+            elif np.isinf(prev_entropy) or np.isinf(current_entropy):
+                entropy_diff = float("inf")
+            else:
+                entropy_diff = abs(current_entropy - prev_entropy)
+
             if entropy_diff > self._threshold:
                 self._last_change_point = self._position - self._window_size // 2
-
-            min_history = 5
-            epsilon = 1e-6
-
-            if len(self._entropy_values) >= min_history:
-                recent = np.array(list(self._entropy_values)[-min_history:])
-                var_entropy = np.var(recent)
-                mean_entropy = np.mean(recent)
-
-                if mean_entropy > epsilon and (var_entropy / mean_entropy) > self._threshold:
-                    self._last_change_point = self._position - self._window_size // 4
 
         self._entropy_values.append(current_entropy)
 
     def _calculate_approximate_entropy_vectorized(self, time_series: npt.NDArray[np.float64]) -> float:
         """
-        Compute Approximate Entropy for the given window using a vectorized approach.
+        Compute Approximate Entropy using vectorized operations.
 
         :param time_series: Current rolling window.
         :type time_series: numpy.ndarray
         :return: The computed ApEn value.
         :rtype: float
-
-        .. note::
-           - If ``r`` is not provided, it is derived as ``r_factor * std(time_series)``.
         """
         r = self._r
         if r is None:
-            r = self._r_factor * np.std(time_series)
+            std_dev = np.std(time_series)
+            if std_dev == 0:
+                return 0.0
+            r = float(self._r_factor * std_dev)
+
+        assert r is not None
 
         phi_m = self._calculate_phi_vectorized(time_series, self._m, r)
         phi_m_plus_1 = self._calculate_phi_vectorized(time_series, self._m + 1, r)
 
-        return abs(phi_m - phi_m_plus_1)
+        return float(phi_m - phi_m_plus_1)
 
     def _calculate_phi_vectorized(self, time_series: npt.NDArray[np.float64], m: int, r: float) -> float:
         """

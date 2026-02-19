@@ -136,7 +136,7 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
             return
 
         current_window = np.fromiter(self._buffer, dtype=float)
-        current_entropy = self._calculate_sample_entropy(current_window)
+        current_entropy = self._calculate_sample_entropy_vectorized(current_window)
 
         if np.isinf(current_entropy) or np.isnan(current_entropy):
             current_entropy = float("inf")
@@ -156,7 +156,7 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
 
         self._entropy_values.append(current_entropy)
 
-    def _calculate_sample_entropy(self, time_series: np.ndarray) -> float:
+    def _calculate_sample_entropy_vectorized(self, time_series: npt.NDArray[np.float64]) -> float:
         """
         Compute Sample Entropy for the given window.
 
@@ -175,7 +175,7 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         if r is None:
             return float("inf")
 
-        def count_matches_fast(m_val: int):
+        def count_matches_fast(m_val: int) -> int:
             n_vec = N - m_val + 1
             if n_vec <= 0:
                 return 0
@@ -187,7 +187,7 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
             diffs = np.abs(vectors[:, None, :] - vectors[None, :, :])
             max_diffs = diffs.max(axis=2)
 
-            return np.sum(max_diffs[np.triu_indices(n_vec, k=1)] < r)
+            return int(np.sum(max_diffs[np.triu_indices(n_vec, k=1)] < r))
 
         B = count_matches_fast(self._m)
         A = count_matches_fast(self._m + 1)

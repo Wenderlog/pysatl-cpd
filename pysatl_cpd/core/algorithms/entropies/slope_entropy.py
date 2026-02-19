@@ -157,7 +157,7 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         ):
             self._last_change_point = self._position - 1
 
-    def _calculate_slope_entropy_vectorized(self, time_series: np.ndarray) -> float:
+    def _calculate_slope_entropy_vectorized(self, time_series: npt.NDArray[np.float64]) -> float:
         """
         Compute slope entropy for the given window using vectorized approach.
 
@@ -195,7 +195,7 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
 
         return float(entropy)
 
-    def _symbolize_slopes(self, diffs: np.ndarray) -> np.ndarray:
+    def _symbolize_slopes(self, diffs: npt.NDArray[np.float64]) -> npt.NDArray[np.int32]:
         symbols = np.zeros_like(diffs, dtype=int)
         symbols[diffs > self._gamma] = 2
         symbols[(diffs > self._delta) & (diffs <= self._gamma)] = 1
@@ -203,7 +203,7 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         symbols[diffs < -self._gamma] = -2
         return symbols
 
-    def _create_slope_pattern(self, subsequence: np.ndarray) -> list[int]:
+    def _create_slope_pattern(self, subsequence: npt.NDArray[np.float64]) -> list[int]:
         """
         Encode a length-``embedding_dim`` subsequence into a slope pattern.
 
@@ -223,7 +223,7 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         - ``d < -gamma`` → ``-2`` (steep negative)
         """
         diffs = np.diff(subsequence)
-        return self._symbolize_slopes(diffs).tolist()
+        return [int(x) for x in self._symbolize_slopes(diffs)]
 
     def get_symbol_meanings(self) -> dict[int, str]:
         return {
@@ -331,7 +331,7 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
             "max_patterns": 5 ** (self._embedding_dim - 1),
         }
 
-    def set_parameters(self, **kwargs) -> None:
+    def set_parameters(self, **kwargs: Any) -> None:
         """
         Update detector parameters in place.
 

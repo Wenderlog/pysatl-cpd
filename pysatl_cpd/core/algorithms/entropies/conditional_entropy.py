@@ -164,7 +164,9 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
         self._prev_x = x_obs
         self._prev_y = y_obs
 
-    def _process_buffer_deviations(self, x_obs: float, y_obs: float, curr_x: np.ndarray, curr_y: np.ndarray) -> None:
+    def _process_buffer_deviations(
+        self, x_obs: float, y_obs: float, curr_x: npt.NDArray[np.float64], curr_y: npt.NDArray[np.float64]
+    ) -> None:
         """
         Checks if the current observations deviate significantly from
         the moving averages of the previous values in the buffer.
@@ -185,7 +187,9 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
             if abs(x_obs - mean_x) > self._anomaly_threshold or abs(y_obs - mean_y) > self._anomaly_threshold:
                 self._last_change_point = self._position
 
-    def _check_correlation_change(self, x_obs: float, y_obs: float, curr_x: np.ndarray, curr_y: np.ndarray) -> None:
+    def _check_correlation_change(
+        self, x_obs: float, y_obs: float, curr_x: npt.NDArray[np.float64], curr_y: npt.NDArray[np.float64]
+    ) -> None:
         """
         Checks for changes in the correlation between the most recent observations in the buffer.
          If a significant change in
@@ -220,7 +224,7 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
                 except Exception:
                     pass
 
-    def _compute_entropy(self, window_x: np.ndarray, window_y: np.ndarray) -> None:
+    def _compute_entropy(self, window_x: npt.NDArray[np.float64], window_y: npt.NDArray[np.float64]) -> None:
         """
         Computes the conditional entropy for the most recent observations in the buffer.
         If the number of entropy values exceeds
