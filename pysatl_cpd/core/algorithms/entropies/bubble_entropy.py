@@ -7,7 +7,7 @@ __copyright__ = "Copyright (c) 2025 PySATL project"
 __license__ = "SPDX-License-Identifier: MIT"
 
 
-from collections import Counter, deque
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -46,6 +46,7 @@ class BubbleEntropyAlgorithm(OnlineAlgorithm):
         embedding_dimension: int = 3,
         time_delay: int = 1,
         threshold: float = 0.2,
+        anomaly_threshold: float = 3.0,
     ):
         """
         Initializes the BubbleEntropyAlgorithm with the specified parameters.
@@ -55,13 +56,15 @@ class BubbleEntropyAlgorithm(OnlineAlgorithm):
         :param time_delay: Time delay between elements in each state vector for calculating permutation entropy.
         :param threshold: Threshold for detecting changes based on entropy differences.
         """
+        super().__init__()
         self._window_size = window_size
         self._embedding_dimension = embedding_dimension
         self._time_delay = time_delay
         self._threshold = threshold
+        self._anomaly_threshold = anomaly_threshold
 
-        self._buffer: deque[float] = deque(maxlen=window_size * 2)
-        self._entropy_values: list[float] = []
+        self._buffer: deque[float] = deque(maxlen=window_size)
+        self._entropy_values: deque[float] = deque(maxlen=200)
         self._position: int = 0
         self._last_change_point: Optional[int] = None
 
@@ -73,7 +76,7 @@ class BubbleEntropyAlgorithm(OnlineAlgorithm):
         :return: `True` if a change point is detected, otherwise `False`.
         """
         if isinstance(observation, np.ndarray):
-            for obs in observation:
+            for obs in observation.flat:
                 self._process_single_observation(float(obs))
         else:
             self._process_single_observation(float(observation))
@@ -87,13 +90,10 @@ class BubbleEntropyAlgorithm(OnlineAlgorithm):
         :param observation: A single observation or an array of observations.
         :return: The position of the detected change point, or `None` if no change point is detected.
         """
-        change_detected = self.detect(observation)
-
-        if change_detected:
+        if self.detect(observation):
             change_point = self._last_change_point
             self._last_change_point = None
             return change_point
-
         return None
 
     def _process_single_observation(self, observation: float) -> None:
@@ -103,12 +103,9 @@ class BubbleEntropyAlgorithm(OnlineAlgorithm):
 
         :param observation: The observation value to be processed.
         """
-        threshold_value1 = 3.0
-        threshold_value2 = 2.0
-
         if len(self._buffer) >= self._window_size // 2:
-            buffer_mean = sum(list(self._buffer)[-self._window_size // 2 :]) / (self._window_size // 2)
-            if abs(observation - buffer_mean) > threshold_value1:
+            current_mean = np.mean(self._buffer)
+            if abs(observation - current_mean) > self._anomaly_threshold:
                 self._last_change_point = self._position
 
         self._buffer.append(observation)
@@ -118,12 +115,13 @@ class BubbleEntropyAlgorithm(OnlineAlgorithm):
         if len(self._buffer) < self._window_size or len(self._buffer) < min_required:
             return
 
-        current_entropy = self._calculate_bubble_entropy(np.array(list(self._buffer)[-self._window_size :]))
+        current_window = np.fromiter(self._buffer, dtype=float)
+        current_entropy = 0.0 if np.std(current_window) == 0 else self._calculate_bubble_entropy(current_window)
+
         self._entropy_values.append(current_entropy)
-
-        if len(self._entropy_values) >= threshold_value2:
+        min_history = 2
+        if len(self._entropy_values) >= min_history:
             entropy_diff = abs(self._entropy_values[-1] - self._entropy_values[-2])
-
             if entropy_diff > self._threshold:
                 self._last_change_point = self._position - self._window_size // 2
 
@@ -135,15 +133,17 @@ class BubbleEntropyAlgorithm(OnlineAlgorithm):
         :param time_series: The time series to analyze.
         :return: The computed bubble entropy value.
         """
-        H_swaps_m = self._calculate_permutation_entropy(time_series, self._embedding_dimension)
-        H_swaps_m_plus_1 = self._calculate_permutation_entropy(time_series, self._embedding_dimension + 1)
+        h_m = self._calculate_permutation_entropy_vectorized(time_series, self._embedding_dimension)
+        h_m_plus_1 = self._calculate_permutation_entropy_vectorized(time_series, self._embedding_dimension + 1)
 
         denom = np.log((self._embedding_dimension + 1) / self._embedding_dimension)
-        bubble_entropy = (H_swaps_m_plus_1 - H_swaps_m) / denom
+        if denom == 0:
+            return 0.0
 
+        bubble_entropy = (h_m_plus_1 - h_m) / denom
         return float(bubble_entropy)
 
-    def _calculate_permutation_entropy(self, time_series: npt.NDArray[np.float64], embedding_dimension: int) -> float:
+    def _calculate_permutation_entropy_vectorized(self, time_series: npt.NDArray[np.float64], m: int) -> float:
         """
         Calculates the permutation entropy of a time series based on the given embedding dimension.
 
@@ -151,21 +151,32 @@ class BubbleEntropyAlgorithm(OnlineAlgorithm):
         :param embedding_dimension: The embedding dimension for the state vectors.
         :return: The computed permutation entropy value.
         """
-        permutation_vectors = []
-        for index in range(len(time_series) - embedding_dimension * self._time_delay):
-            current_window = time_series[index : index + embedding_dimension * self._time_delay : self._time_delay]
-            permutation_vector = np.argsort(current_window)
-            permutation_vectors.append(tuple(permutation_vector))
+        N = len(time_series)
+        n_vectors = N - (m - 1) * self._time_delay
 
-        permutation_counts = Counter(permutation_vectors)
-        total_permutations = len(permutation_vectors)
+        if n_vectors <= 0:
+            return 0.0
 
-        if total_permutations == 0:
-            return float(0)
+        shape = (n_vectors, m)
+        itemsize = time_series.strides[0]
+        strides = (itemsize, itemsize * self._time_delay)
 
-        permutation_probabilities = [count / total_permutations for count in permutation_counts.values()]
-        permutation_entropy = -np.sum(
-            [probability * np.log2(probability) for probability in permutation_probabilities if probability > 0]
-        )
+        vectors = np.lib.stride_tricks.as_strided(time_series, shape=shape, strides=strides)
 
-        return float(permutation_entropy)
+        sorted_indices = np.argsort(vectors, axis=1)
+        _, counts = np.unique(sorted_indices, axis=0, return_counts=True)
+        probs = counts / n_vectors
+        entropy = -np.sum(probs * np.log2(probs))
+
+        return float(entropy)
+
+    def get_entropy_history(self) -> list[float]:
+        """Returns the history of entropy values."""
+        return list(self._entropy_values)
+
+    def reset(self) -> None:
+        """Resets the internal state."""
+        self._buffer.clear()
+        self._entropy_values.clear()
+        self._position = 0
+        self._last_change_point = None
