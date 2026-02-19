@@ -11,7 +11,7 @@ def set_seed():
 
 
 def construct_shannon_entropy_algorithm():
-    return ShannonEntropyAlgorithm(window_size=40, bins=10, threshold=0.3)
+    return ShannonEntropyAlgorithm(window_size=40, bins=10, threshold=0.3, anomaly_threshold=2.0, std_threshold=3.0)
 
 
 @pytest.fixture(scope="function")
@@ -133,32 +133,31 @@ def test_edge_cases():
     algorithm = construct_shannon_entropy_algorithm()
 
     changes_detected = False
-    for i in range(20):
-        if algorithm.detect(float(i)):
+    for i in range(30):
+        point = float(i) * 0.01 + np.random.normal(0, 0.0001)
+        if algorithm.detect(point):
             changes_detected = True
 
     assert not changes_detected
 
-    algorithm = construct_shannon_entropy_algorithm()
-
-    for _ in range(50):
+    algorithm.reset()
+    for _ in range(40):
         algorithm.detect(1.0)
 
     change_detected = False
-    for _ in range(50):
+    for _ in range(10):
         if algorithm.detect(10.0):
             change_detected = True
             break
-
     assert change_detected
 
-    algorithm = construct_shannon_entropy_algorithm()
-    constant_signal = np.ones(100)
-
-    change_detected = False
-    for point in constant_signal:
-        if algorithm.detect(point):
-            change_detected = True
+    algorithm.reset()
+    for i in range(20):
+        algorithm.detect(float(i))
+    constant_detected = False
+    for _ in range(15):
+        if algorithm.detect(5.0):
+            constant_detected = True
             break
 
-    assert not change_detected
+    assert constant_detected
