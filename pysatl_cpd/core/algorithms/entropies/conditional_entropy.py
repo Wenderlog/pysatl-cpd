@@ -55,6 +55,7 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
         window_size: int = 40,
         bins: int = 10,
         threshold: float = 0.3,
+        anomaly_threshold: float = 3.0,
     ):
         """
         Initializes the ConditionalEntropyAlgorithm with the specified parameters.
@@ -63,18 +64,23 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
         :param bins: Number of bins used to create histograms for the joint probability distribution.
         :param threshold: Threshold for detecting changes based on entropy differences.
         """
+        super().__init__()
         self._window_size = window_size
         self._bins = bins
         self._threshold = threshold
+        self._anomaly_threshold = anomaly_threshold
 
-        self._buffer_x: deque[float] = deque(maxlen=window_size * 2)
-        self._buffer_y: deque[float] = deque(maxlen=window_size * 2)
-        self._entropy_values: list[float] = []
+        self._buffer_x: deque[float] = deque(maxlen=window_size)
+        self._buffer_y: deque[float] = deque(maxlen=window_size)
+        self._entropy_values: deque[float] = deque(maxlen=200)
         self._position: int = 0
         self._last_change_point: Optional[int] = None
         self._prev_x: Optional[float] = None
         self._prev_y: Optional[float] = None
         self._constant_value_count: int = 0
+        self._const_threshold = 10
+        self._correlation_threshold = 0.3
+        self._epsilon = 1e-10
 
     def detect(self, observation: np.float64 | npt.NDArray[np.float64]) -> bool:
         """
@@ -83,15 +89,15 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
         :param observation: A single observation or an array of observations to be processed.
         :return: `True` if a change point is detected, otherwise `False`.
         """
-        min_param = 2
-        if isinstance(observation, np.ndarray) and observation.ndim > 0:
-            if observation.shape[0] < min_param:
-                raise ValueError("Observation array must contain both X and Y values")
+        min_dimensions = 2
+        if isinstance(observation, np.ndarray) and observation.size >= min_dimensions:
             x_obs = float(observation[0])
             y_obs = float(observation[1])
             self._process_observation_pair(x_obs, y_obs)
+        elif isinstance(observation, (list, tuple)) and len(observation) >= min_dimensions:
+            self._process_observation_pair(float(observation[0]), float(observation[1]))
         else:
-            raise ValueError("Observation must be an array containing both X and Y values")
+            raise ValueError("Observation must contain at least two values (X and Y).")
 
         return self._last_change_point is not None
 
@@ -102,13 +108,10 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
         :param observation: A single observation or an array of observations.
         :return: The position of the detected change point, or `None` if no change point is detected.
         """
-        change_detected = self.detect(observation)
-
-        if change_detected:
+        if self.detect(observation):
             change_point = self._last_change_point
             self._last_change_point = None
             return change_point
-
         return None
 
     def _process_observation_pair(self, x_obs: float, y_obs: float) -> None:
@@ -121,25 +124,26 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
         :param x_obs: The X observation value to be processed
         :param y_obs: The Y observation value to be processed
         """
-        constant_value_threshold = 10
-        significant_deviation_threshold = 3
-        max_entropy_value = 2
-        _epsilon_ = 1e-10
+        self._handle_constant_values(x_obs, y_obs)
+        min_len = self._window_size // 4
 
-        self._handle_constant_values(x_obs, y_obs, constant_value_threshold)
-        self._process_buffer_deviations(x_obs, y_obs, significant_deviation_threshold)
-        self._check_correlation_change(x_obs, y_obs, _epsilon_)
+        if len(self._buffer_x) >= min_len:
+            curr_x = np.array(self._buffer_x)
+            curr_y = np.array(self._buffer_y)
+            self._process_buffer_deviations(x_obs, y_obs, curr_x, curr_y)
+            self._check_correlation_change(x_obs, y_obs, curr_x, curr_y)
 
         self._buffer_x.append(x_obs)
         self._buffer_y.append(y_obs)
         self._position += 1
-
         if len(self._buffer_x) < self._window_size:
             return
+        window_x = np.array(self._buffer_x)
+        window_y = np.array(self._buffer_y)
 
-        self._compute_entropy(max_entropy_value)
+        self._compute_entropy(window_x, window_y)
 
-    def _handle_constant_values(self, x_obs: float, y_obs: float, constant_value_threshold: int) -> None:
+    def _handle_constant_values(self, x_obs: float, y_obs: float) -> None:
         """
         Checks if the current observations are constant (i.e., the same as the previous ones).
         If so, it increments the counter
@@ -150,17 +154,17 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
         :param constant_value_threshold: The threshold for detecting constant values.
         """
         if self._prev_x is not None and self._prev_y is not None:
-            if x_obs == self._prev_x and y_obs == self._prev_y:
+            if np.isclose(x_obs, self._prev_x) and np.isclose(y_obs, self._prev_y):
                 self._constant_value_count += 1
-            else:
-                if self._constant_value_count >= constant_value_threshold:
+                if self._constant_value_count >= self._const_threshold:
                     self._last_change_point = self._position
+            else:
                 self._constant_value_count = 0
 
         self._prev_x = x_obs
         self._prev_y = y_obs
 
-    def _process_buffer_deviations(self, x_obs: float, y_obs: float, significant_deviation_threshold: int) -> None:
+    def _process_buffer_deviations(self, x_obs: float, y_obs: float, curr_x: np.ndarray, curr_y: np.ndarray) -> None:
         """
         Checks if the current observations deviate significantly from
         the moving averages of the previous values in the buffer.
@@ -170,17 +174,18 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
         :param y_obs: The current Y observation.
         :param significant_deviation_threshold: The threshold for detecting significant deviations.
         """
-        if len(self._buffer_x) >= self._window_size // 2:
-            buffer_x_mean = sum(list(self._buffer_x)[-self._window_size // 2 :]) / (self._window_size // 2)
-            buffer_y_mean = sum(list(self._buffer_y)[-self._window_size // 2 :]) / (self._window_size // 2)
+        half_win = self._window_size // 2
+        if len(curr_x) >= half_win:
+            recent_x = curr_x[-half_win:]
+            recent_y = curr_y[-half_win:]
 
-            if (
-                abs(x_obs - buffer_x_mean) > significant_deviation_threshold
-                or abs(y_obs - buffer_y_mean) > significant_deviation_threshold
-            ):
+            mean_x = np.mean(recent_x)
+            mean_y = np.mean(recent_y)
+
+            if abs(x_obs - mean_x) > self._anomaly_threshold or abs(y_obs - mean_y) > self._anomaly_threshold:
                 self._last_change_point = self._position
 
-    def _check_correlation_change(self, x_obs: float, y_obs: float, _epsilon_: float) -> None:
+    def _check_correlation_change(self, x_obs: float, y_obs: float, curr_x: np.ndarray, curr_y: np.ndarray) -> None:
         """
         Checks for changes in the correlation between the most recent observations in the buffer.
          If a significant change in
@@ -190,34 +195,32 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
         :param y_obs: The current Y observation.
         :param _epsilon_: A small value to avoid division by zero when calculating standard deviations.
         """
-        threshold = 0.3
-
-        if len(self._buffer_x) >= self._window_size // 4:
-            recent_x = list(self._buffer_x)[-self._window_size // 4 :]
-            recent_y = list(self._buffer_y)[-self._window_size // 4 :]
+        quarter_win = self._window_size // 4
+        if len(curr_x) >= quarter_win:
+            recent_x = curr_x[-quarter_win:]
+            recent_y = curr_y[-quarter_win:]
 
             std_x = np.std(recent_x)
             std_y = np.std(recent_y)
 
-            if std_x > _epsilon_ and std_y > _epsilon_:
+            if std_x > self._epsilon and std_y > self._epsilon:
                 try:
                     corr_before = np.corrcoef(recent_x, recent_y)[0, 1]
-
-                    test_x = [*recent_x, x_obs]
-                    test_y = [*recent_y, y_obs]
+                    test_x = np.append(recent_x, x_obs)
+                    test_y = np.append(recent_y, y_obs)
 
                     corr_after = np.corrcoef(test_x, test_y)[0, 1]
 
                     if (
                         not np.isnan(corr_before)
                         and not np.isnan(corr_after)
-                        and abs(corr_after - corr_before) > threshold
+                        and abs(corr_after - corr_before) > self._correlation_threshold
                     ):
                         self._last_change_point = self._position
                 except Exception:
                     pass
 
-    def _compute_entropy(self, max_entropy_value: int) -> None:
+    def _compute_entropy(self, window_x: np.ndarray, window_y: np.ndarray) -> None:
         """
         Computes the conditional entropy for the most recent observations in the buffer.
         If the number of entropy values exceeds
@@ -226,15 +229,12 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
 
         :param max_entropy_value: The maximum number of entropy values to consider when detecting changes.
         """
-        window_x = np.array(list(self._buffer_x)[-self._window_size :])
-        window_y = np.array(list(self._buffer_y)[-self._window_size :])
-
         current_entropy = self._compute_conditional_entropy(window_x, window_y)
         self._entropy_values.append(current_entropy)
 
-        if len(self._entropy_values) >= max_entropy_value:
+        min_history = 2
+        if len(self._entropy_values) >= min_history:
             entropy_diff = abs(self._entropy_values[-1] - self._entropy_values[-2])
-
             if entropy_diff > self._threshold:
                 self._last_change_point = self._position - self._window_size // 2
 
@@ -249,10 +249,29 @@ class ConditionalEntropyAlgorithm(OnlineAlgorithm):
         :return: The calculated conditional entropy value.
         """
         hist2d, _, _ = np.histogram2d(time_series_x, time_series_y, bins=[self._bins, self._bins])
-        joint_probability_matrix = hist2d / np.sum(hist2d)
-        p_y = np.sum(joint_probability_matrix, axis=0)
-        conditional_probability = np.divide(joint_probability_matrix, p_y, where=p_y != 0)
-        H_X_given_Y = -np.nansum(
-            joint_probability_matrix * np.log2(conditional_probability, where=conditional_probability > 0)
-        )
-        return float(H_X_given_Y)
+        total_samples = np.sum(hist2d)
+        if total_samples == 0:
+            return 0.0
+
+        p_xy = hist2d / total_samples
+
+        p_y = np.sum(p_xy, axis=0)
+        p_x_given_y = np.divide(p_xy, p_y, where=p_y != 0)
+        log_term = np.log2(p_x_given_y, where=p_x_given_y > 0)
+        log_term[p_x_given_y <= 0] = 0
+
+        entropy = -np.sum(p_xy * log_term)
+        return float(entropy)
+
+    def get_entropy_history(self) -> list[float]:
+        return list(self._entropy_values)
+
+    def reset(self) -> None:
+        self._buffer_x.clear()
+        self._buffer_y.clear()
+        self._entropy_values.clear()
+        self._position = 0
+        self._last_change_point = None
+        self._prev_x = None
+        self._prev_y = None
+        self._constant_value_count = 0
