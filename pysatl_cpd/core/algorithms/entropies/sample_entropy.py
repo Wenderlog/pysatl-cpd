@@ -55,7 +55,7 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
     SampEn difference test and the normalized short-term variance test. Default: ``0.5``.
     :type threshold: float
 
-    . note::
+    .. note::
        - The detector processes observations in a streaming fashion.
        - Change localization is approximate and centered near the middle (or quarter)
          of the current window depending on which criterion was triggered.
@@ -68,15 +68,18 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         r: Optional[float] = None,
         r_factor: float = 0.2,
         threshold: float = 0.5,
+        anomaly_threshold: float = 3.0,
     ):
+        super().__init__()
         self._window_size = window_size
         self._m = m
         self._r = r
         self._r_factor = r_factor
         self._threshold = threshold
+        self._anomaly_threshold = anomaly_threshold
 
-        self._buffer: deque[float] = deque(maxlen=window_size * 2)
-        self._entropy_values: list[float] = []
+        self._buffer: deque[float] = deque(maxlen=window_size)
+        self._entropy_values: deque[float] = deque(maxlen=200)
         self._position: int = 0
         self._last_change_point: Optional[int] = None
 
@@ -90,7 +93,7 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         :rtype: bool
         """
         if isinstance(observation, np.ndarray):
-            for obs in observation:
+            for obs in observation.flat:
                 self._process_single_observation(float(obs))
         else:
             self._process_single_observation(float(observation))
@@ -107,13 +110,10 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
                  or ``None`` if no change-point is detected.
         :rtype: int or None
         """
-        change_detected = self.detect(observation)
-
-        if change_detected:
-            change_point = self._last_change_point
+        if self.detect(observation):
+            cp = self._last_change_point
             self._last_change_point = None
-            return change_point
-
+            return cp
         return None
 
     def _process_single_observation(self, observation: float) -> None:
@@ -123,48 +123,40 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         :param observation: New value to be appended to the rolling buffer.
         :type observation: float
         """
-        v = 3
-        self._buffer.append(observation)
         self._position += 1
 
-        min_required = self._window_size + self._m
-        if len(self._buffer) < min_required:
+        if len(self._buffer) >= self._window_size // 2:
+            current_mean = np.mean(self._buffer)
+            if abs(observation - current_mean) > self._anomaly_threshold:
+                self._last_change_point = self._position
+
+        self._buffer.append(observation)
+
+        if len(self._buffer) < self._window_size:
             return
 
-        current_window = np.array(list(self._buffer)[-self._window_size :])
+        current_window = np.fromiter(self._buffer, dtype=float)
         current_entropy = self._calculate_sample_entropy(current_window)
 
         if np.isinf(current_entropy) or np.isnan(current_entropy):
             current_entropy = float("inf")
 
-        self._entropy_values.append(current_entropy)
+        if len(self._entropy_values) >= 1:
+            prev_entropy = self._entropy_values[-1]
 
-        if len(self._entropy_values) >= v - 1:
-            prev_entropy = self._entropy_values[-2]
-            curr_entropy = self._entropy_values[-1]
-
-            # Robust difference that tolerates infinities from degenerate windows.
-            if np.isinf(prev_entropy) and np.isinf(curr_entropy):
+            if np.isinf(prev_entropy) and np.isinf(current_entropy):
                 entropy_diff = 0.0
-            elif np.isinf(prev_entropy):
-                entropy_diff = float("inf") if curr_entropy != 0 else 0.0
-            elif np.isinf(curr_entropy):
-                entropy_diff = float("inf") if prev_entropy != 0 else 0.0
+            elif np.isinf(prev_entropy) or np.isinf(current_entropy):
+                entropy_diff = float("inf")
             else:
-                entropy_diff = abs(curr_entropy - prev_entropy)
+                entropy_diff = abs(current_entropy - prev_entropy)
 
             if entropy_diff > self._threshold:
                 self._last_change_point = self._position - self._window_size // 2
 
-        if len(self._entropy_values) >= v + 2:
-            recent_entropies = [e for e in self._entropy_values[-5:] if not np.isinf(e)]
-            if len(recent_entropies) >= v:
-                entropy_variance = np.var(recent_entropies)
-                mean_entropy = np.mean(recent_entropies)
-                if mean_entropy > 0 and entropy_variance / mean_entropy > self._threshold:
-                    self._last_change_point = self._position - self._window_size // 4
+        self._entropy_values.append(current_entropy)
 
-    def _calculate_sample_entropy(self, time_series: npt.NDArray[np.float64]) -> float:
+    def _calculate_sample_entropy(self, time_series: np.ndarray) -> float:
         """
         Compute Sample Entropy for the given window.
 
@@ -179,51 +171,31 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
            - When the window variance is zero, ``inf`` is returned to reflect undefined entropy.
         """
         N = len(time_series)
-        if self._m + 1 > N:
+        r = self.get_current_r()
+        if r is None:
             return float("inf")
 
-        r = self._r
-        if r is None:
-            std_dev = float(np.std(time_series))
-            if std_dev == 0:
-                return float("inf")
-            r = self._r_factor * std_dev
+        def count_matches_fast(m_val: int):
+            n_vec = N - m_val + 1
+            if n_vec <= 0:
+                return 0
 
-        assert r is not None
+            shape = (n_vec, m_val)
+            strides = (time_series.strides[0], time_series.strides[0])
+            vectors = np.lib.stride_tricks.as_strided(time_series, shape=shape, strides=strides)
 
-        B = self._count_matches(time_series, self._m, r)
-        A = self._count_matches(time_series, self._m + 1, r)
+            diffs = np.abs(vectors[:, None, :] - vectors[None, :, :])
+            max_diffs = diffs.max(axis=2)
+
+            return np.sum(max_diffs[np.triu_indices(n_vec, k=1)] < r)
+
+        B = count_matches_fast(self._m)
+        A = count_matches_fast(self._m + 1)
 
         if B == 0 or A == 0:
             return float("inf")
 
         return float(-np.log(A / B))
-
-    def _count_matches(self, time_series: npt.NDArray[np.float64], m: int, r: float) -> int:
-        """
-        Count the number of matching pairs of patterns under Chebyshev tolerance.
-
-        :param time_series: Current rolling window.
-        :type time_series: numpy.ndarray
-        :param m: Embedding length.
-        :type m: int
-        :param r: Tolerance radius.
-        :type r: float
-        :return: Number of unordered matching pairs among m-length sub-sequences.
-        :rtype: int
-        """
-        N = len(time_series)
-        matches = 0
-
-        for i in range(N - m + 1):
-            xi = time_series[i : i + m]
-            for j in range(i + 1, N - m + 1):
-                xj = time_series[j : j + m]
-                distance = self._chebyshev_distance(xi, xj)
-                if distance < r:
-                    matches += 1
-
-        return matches
 
     def _chebyshev_distance(self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]) -> float:
         """
@@ -258,7 +230,7 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
         :return: A copy of the internal SampEn sequence evaluated at processed steps.
         :rtype: list[float]
         """
-        return self._entropy_values.copy()
+        return list(self._entropy_values)
 
     def get_current_r(self) -> Optional[float]:
         """
@@ -274,9 +246,8 @@ class SampleEntropyAlgorithm(OnlineAlgorithm):
             return self._r
 
         if len(self._buffer) > 0:
-            current_window = np.array(list(self._buffer)[-self._window_size :])
-            std_dev = np.std(current_window)
-            return self._r_factor * std_dev if std_dev > 0 else None
+            std_dev = np.std(list(self._buffer))
+            return float(self._r_factor * std_dev) if std_dev > 0 else None
 
         return None
 
