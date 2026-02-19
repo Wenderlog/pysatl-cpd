@@ -1,5 +1,6 @@
 """
 Module implementing the Approximate Entropy (ApEn) algorithm for online change-point detection.
+Optimized for streaming performance using vectorization.
 
 The algorithm maintains a rolling window over a univariate time series, computes the
 Approximate Entropy for the current window, and raises a change-point signal when
@@ -7,7 +8,7 @@ the short-term dynamics of ApEn indicate a regime shift.
 
 ApEn is computed as:
 
-. math::
+.. math::
 
     ApEn(m, r, N) = \\phi(m, r) - \\phi(m+1, r)
 
@@ -36,7 +37,11 @@ from pysatl_cpd.core.algorithms.online_algorithm import OnlineAlgorithm
 
 class ApproximateEntropyAlgorithm(OnlineAlgorithm):
     """
-    Online change-point detector based on Approximate Entropy (ApEn).
+    Optimized Online change-point detector based on Approximate Entropy (ApEn).
+
+    Includes:
+    - Vectorized ApEn calculation (NumPy broadcasting instead of loops).
+    - Constant memory usage (fixed-size deques).
 
     :param window_size: Sliding window length used to compute ApEn. Default: ``100``.
     :type window_size: int
@@ -45,13 +50,15 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
     :param r: Fixed tolerance radius. If ``None``, an adaptive radius is used via ``r_factor``.
     :type r: float or None
     :param r_factor: Multiplicative factor for adaptive radius,
-    i.e. ``r = r_factor * std(window)`` when ``r`` is ``None``.
+                     i.e. ``r = r_factor * std(window)`` when ``r`` is ``None``.
     :type r_factor: float
     :param threshold: Decision threshold used in both the first-order ApEn difference test and
                       the normalized short-term variance test. Default: ``0.3``.
     :type threshold: float
+    :param anomaly_threshold: Threshold for instant spike detection. Default: ``3.0``.
+    :type anomaly_threshold: float
 
-    . note::
+    .. note::
        - The detector processes observations in a streaming fashion.
        - Change localization is returned as an approximate index around the center (or quarter)
          of the current window depending on which criterion was triggered.
@@ -64,15 +71,19 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         r: Optional[float] = None,
         r_factor: float = 0.2,
         threshold: float = 0.3,
+        anomaly_threshold: float = 3.0,
     ):
+        super().__init__()
         self._window_size = window_size
         self._m = m
         self._r = r
         self._r_factor = r_factor
         self._threshold = threshold
+        self._anomaly_threshold = anomaly_threshold
 
-        self._buffer: deque[float] = deque(maxlen=window_size * 2)
-        self._entropy_values: list[float] = []
+        self._buffer: deque[float] = deque(maxlen=window_size)
+        self._entropy_values: deque[float] = deque(maxlen=200)
+
         self._position: int = 0
         self._last_change_point: Optional[int] = None
 
@@ -86,7 +97,7 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         :rtype: bool
         """
         if isinstance(observation, np.ndarray):
-            for obs in observation:
+            for obs in observation.flat:
                 self._process_single_observation(float(obs))
         else:
             self._process_single_observation(float(observation))
@@ -103,13 +114,10 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
                  or ``None`` if no change-point is detected.
         :rtype: int or None
         """
-        change_detected = self.detect(observation)
-
-        if change_detected:
-            change_point = self._last_change_point
+        if self.detect(observation):
+            cp = self._last_change_point
             self._last_change_point = None
-            return change_point
-
+            return cp
         return None
 
     def _process_single_observation(self, observation: float) -> None:
@@ -119,69 +127,69 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         :param observation: New value to be appended to the rolling buffer.
         :type observation: float
         """
-        v = 2
+        if len(self._buffer) >= self._window_size // 2:
+            current_mean = np.mean(self._buffer)
+            if abs(observation - current_mean) > self._anomaly_threshold:
+                self._last_change_point = self._position
+
         self._buffer.append(observation)
         self._position += 1
 
-        min_required = self._window_size + self._m
+        min_required = self._window_size
         if len(self._buffer) < min_required:
             return
 
-        current_window = np.array(list(self._buffer)[-self._window_size :])
-        current_entropy = self._calculate_approximate_entropy(current_window)
+        current_window = np.fromiter(self._buffer, dtype=float)
+        if np.std(current_window) == 0:
+            current_entropy = 0.0
+        else:
+            current_entropy = self._calculate_approximate_entropy_vectorized(current_window)
 
         if np.isinf(current_entropy) or np.isnan(current_entropy):
             current_entropy = 0.0
 
-        self._entropy_values.append(current_entropy)
-
-        if len(self._entropy_values) >= v:
-            entropy_diff = abs(self._entropy_values[-1] - self._entropy_values[-2])
+        if len(self._entropy_values) > 0:
+            entropy_diff = abs(current_entropy - self._entropy_values[-1])
             if entropy_diff > self._threshold:
                 self._last_change_point = self._position - self._window_size // 2
 
-        if len(self._entropy_values) >= v + 3:
-            recent_entropies = self._entropy_values[-5:]
-            entropy_variance = np.var(recent_entropies)
-            mean_entropy = np.mean(recent_entropies)
-            if mean_entropy > 0 and entropy_variance / abs(mean_entropy) > self._threshold:
-                self._last_change_point = self._position - self._window_size // 4
+            min_history = 5
+            epsilon = 1e-6
 
-    def _calculate_approximate_entropy(self, time_series: npt.NDArray[np.float64]) -> float:
+            if len(self._entropy_values) >= min_history:
+                recent = np.array(list(self._entropy_values)[-min_history:])
+                var_entropy = np.var(recent)
+                mean_entropy = np.mean(recent)
+
+                if mean_entropy > epsilon and (var_entropy / mean_entropy) > self._threshold:
+                    self._last_change_point = self._position - self._window_size // 4
+
+        self._entropy_values.append(current_entropy)
+
+    def _calculate_approximate_entropy_vectorized(self, time_series: npt.NDArray[np.float64]) -> float:
         """
-        Compute Approximate Entropy for the given window.
+        Compute Approximate Entropy for the given window using a vectorized approach.
 
         :param time_series: Current rolling window.
         :type time_series: numpy.ndarray
-        :return: The computed ApEn value. Returns ``0.0`` when the input is too short or degenerate.
+        :return: The computed ApEn value.
         :rtype: float
 
-        . note::
+        .. note::
            - If ``r`` is not provided, it is derived as ``r_factor * std(time_series)``.
-           - When the window variance is zero, ``0.0`` is returned to avoid division by zero.
         """
-        N = len(time_series)
-
-        if self._m + 1 > N:
-            return 0.0
-
         r = self._r
         if r is None:
-            std_dev = float(np.std(time_series))
-            if std_dev == 0:
-                return 0.0
-            r = self._r_factor * std_dev
+            r = self._r_factor * np.std(time_series)
 
-        assert r is not None
+        phi_m = self._calculate_phi_vectorized(time_series, self._m, r)
+        phi_m_plus_1 = self._calculate_phi_vectorized(time_series, self._m + 1, r)
 
-        phi_m = self._calculate_phi(time_series, self._m, r)
-        phi_m_plus_1 = self._calculate_phi(time_series, self._m + 1, r)
-        approximate_entropy = phi_m - phi_m_plus_1
-        return float(approximate_entropy)
+        return abs(phi_m - phi_m_plus_1)
 
-    def _calculate_phi(self, time_series: npt.NDArray[np.float64], m: int, r: float) -> float:
+    def _calculate_phi_vectorized(self, time_series: npt.NDArray[np.float64], m: int, r: float) -> float:
         """
-        Compute the auxiliary ``phi(m, r)`` term for ApEn.
+        Compute the auxiliary ``phi(m, r)`` term for ApEn using NumPy broadcasting (Strides).
 
         :param time_series: Current rolling window.
         :type time_series: numpy.ndarray
@@ -192,61 +200,27 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         :return: The average log of match proportions across all m-patterns in the window.
         :rtype: float
 
-        . note::
-           - Uses Chebyshev (max-abs) distance between m-length vectors.
-           - Protects ``log(0)`` by adding a small epsilon.
+        .. note::
+           - Protects ``log(0)`` by adding a small epsilon (1e-10).
         """
         N = len(time_series)
-        n = N - m + 1
+        n_vectors = N - m + 1
 
-        if n <= 0:
+        if n_vectors <= 0:
             return 0.0
 
-        log_sum = 0.0
+        shape = (n_vectors, m)
+        strides = (time_series.strides[0], time_series.strides[0])
+        vectors = np.lib.stride_tricks.as_strided(time_series, shape=shape, strides=strides)
 
-        for i in range(n):
-            xi = time_series[i : i + m]
-            matches = 0
-            for j in range(n):
-                xj = time_series[j : j + m]
-                distance = self._max_distance(xi, xj)
-                if distance <= r:
-                    matches += 1
+        diffs = np.abs(vectors[:, None, :] - vectors[None, :, :])
+        max_diffs = diffs.max(axis=2)
+        matches = (max_diffs <= r).sum(axis=1)
 
-            C_i_m = matches / n
-            if C_i_m > 0:
-                log_sum += np.log(C_i_m)
-            else:
-                log_sum += np.log(1e-10)
+        c_i = matches / n_vectors
+        phi = np.sum(np.log(c_i + 1e-10)) / n_vectors
 
-        phi = log_sum / n
         return float(phi)
-
-    def _max_distance(self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]) -> float:
-        """
-        Compute the Chebyshev (L-infinity) distance between two vectors.
-
-        :param x: First m-length vector.
-        :type x: numpy.ndarray
-        :param y: Second m-length vector.
-        :type y: numpy.ndarray
-        :return: Maximum absolute difference between corresponding elements.
-        :rtype: float
-        """
-        return float(np.max(np.abs(x - y)))
-
-    def _euclidean_distance(self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]) -> float:
-        """
-        Compute the Euclidean (L2) distance between two vectors.
-
-        :param x: First m-length vector.
-        :type x: numpy.ndarray
-        :param y: Second m-length vector.
-        :type y: numpy.ndarray
-        :return: Euclidean distance, defined as ``sqrt(sum((x - y)^2))``.
-        :rtype: float
-        """
-        return float(np.sqrt(np.sum((x - y) ** 2)))
 
     def get_entropy_history(self) -> list[float]:
         """
@@ -255,7 +229,7 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         :return: A copy of the internal ApEn sequence evaluated at processed steps.
         :rtype: list[float]
         """
-        return self._entropy_values.copy()
+        return list(self._entropy_values)
 
     def get_current_r(self) -> Optional[float]:
         """
@@ -269,12 +243,8 @@ class ApproximateEntropyAlgorithm(OnlineAlgorithm):
         """
         if self._r is not None:
             return self._r
-
         if len(self._buffer) > 0:
-            current_window = np.array(list(self._buffer)[-self._window_size :])
-            std_dev = np.std(current_window)
-            return self._r_factor * std_dev if std_dev > 0 else None
-
+            return float(self._r_factor * np.std(list(self._buffer)))
         return None
 
     def get_pattern_length(self) -> int:
