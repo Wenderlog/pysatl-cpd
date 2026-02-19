@@ -48,6 +48,8 @@ class ShannonEntropyAlgorithm(OnlineAlgorithm):
         window_size: int = 40,
         bins: int = 30,
         threshold: float = 0.3,
+        anomaly_threshold: float = 0.5,
+        std_threshold: float = 2.0,
     ):
         """
         Initializes the ShannonEntropyAlgorithm with the specified parameters.
@@ -57,12 +59,17 @@ class ShannonEntropyAlgorithm(OnlineAlgorithm):
         :param bins: Number of bins used to create histograms for entropy calculation.
         :param threshold: Threshold for detecting changes based on entropy differences.
         """
+        super().__init__()
         self._window_size = window_size
         self._bins = bins
         self._threshold = threshold
+        self._anomaly_threshold = anomaly_threshold
+        self._std_threshold = std_threshold
+        self._const_threshold = 10
 
-        self._buffer: deque[float] = deque(maxlen=window_size * 2)
-        self._entropy_values: list[float] = []
+        self._buffer: deque[float] = deque(maxlen=window_size)
+        self._entropy_history: deque[float] = deque(maxlen=5)
+
         self._position: int = 0
         self._last_change_point: Optional[int] = None
         self._prev_observation: Optional[float] = None
@@ -76,7 +83,7 @@ class ShannonEntropyAlgorithm(OnlineAlgorithm):
         :return: `True` if a change point is detected, otherwise `False`.
         """
         if isinstance(observation, np.ndarray):
-            for obs in observation:
+            for obs in observation.flat:
                 self._process_single_observation(float(obs))
         else:
             self._process_single_observation(float(observation))
@@ -108,28 +115,25 @@ class ShannonEntropyAlgorithm(OnlineAlgorithm):
 
         :param observation: The observation value to be processed.
         """
-        threshold = 10
-        threshold1 = 0.5
-        threshold2 = 2
         if self._prev_observation is not None:
-            if observation == self._prev_observation:
+            if np.isclose(observation, self._prev_observation):
                 self._constant_value_count += 1
-            else:
-                if self._constant_value_count >= threshold:
+                if self._constant_value_count >= self._const_threshold:
                     self._last_change_point = self._position
+            else:
                 self._constant_value_count = 0
-
         self._prev_observation = observation
 
         if len(self._buffer) >= self._window_size // 2:
-            buffer_mean = sum(list(self._buffer)[-self._window_size // 2 :]) / (self._window_size // 2)
-            if abs(observation - buffer_mean) > threshold1:
+            arr = np.fromiter(self._buffer, dtype=float)
+
+            if abs(observation - np.mean(arr)) > self._anomaly_threshold:
                 self._last_change_point = self._position
 
-        if len(self._buffer) >= threshold:
-            recent_values = np.array(list(self._buffer)[-10:])
-            std_val = np.std(recent_values)
-            if std_val > 0 and abs(observation - np.mean(recent_values)) > 2 * std_val:
+            recent_window_size = 10
+            recent = arr[-recent_window_size:] if len(arr) >= recent_window_size else arr
+            std_val = np.std(recent)
+            if std_val > 0 and abs(observation - np.mean(recent)) > self._std_threshold * std_val:
                 self._last_change_point = self._position
 
         self._buffer.append(observation)
@@ -138,18 +142,15 @@ class ShannonEntropyAlgorithm(OnlineAlgorithm):
         if len(self._buffer) < self._window_size:
             return
 
-        window = np.array(list(self._buffer)[-self._window_size :])
-        hist, _ = np.histogram(window, bins=self._bins, density=True)
-        hist = hist / np.sum(hist)
-        current_entropy = self._compute_entropy(hist)
+        window_arr = np.fromiter(self._buffer, dtype=float)
+        counts, _ = np.histogram(window_arr, bins=self._bins)
+        probs = counts / counts.sum()
+        current_entropy = self._compute_entropy(probs)
 
-        self._entropy_values.append(current_entropy)
+        if len(self._entropy_history) > 0 and abs(current_entropy - self._entropy_history[-1]) > self._threshold:
+            self._last_change_point = self._position - self._window_size // 2
 
-        if len(self._entropy_values) >= threshold2:
-            entropy_diff = abs(self._entropy_values[-1] - self._entropy_values[-2])
-
-            if entropy_diff > self._threshold:
-                self._last_change_point = self._position - self._window_size // 2
+        self._entropy_history.append(current_entropy)
 
     def _compute_entropy(self, probabilities: npt.NDArray[np.float64]) -> float:
         """
@@ -165,3 +166,14 @@ class ShannonEntropyAlgorithm(OnlineAlgorithm):
         if len(probabilities) == 0:
             return 0.0
         return float(-np.sum(probabilities * np.log2(probabilities)))
+
+    def reset(self) -> None:
+        """
+        Resets the internal state and buffered statistics.
+        """
+        self._buffer.clear()
+        self._entropy_history.clear()
+        self._position = 0
+        self._last_change_point = None
+        self._prev_observation = None
+        self._constant_value_count = 0
