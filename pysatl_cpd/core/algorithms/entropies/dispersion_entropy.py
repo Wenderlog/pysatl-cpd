@@ -54,7 +54,7 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
     :param normalize: If ``True``, normalize entropy by ``log(c^m)``. Default: ``True``.
     :type normalize: bool
 
-    . note::
+    .. note::
        - If ``c^m >= window_size``, the pattern space becomes too large for reliable
          estimation from the window; a ``ValueError`` is raised.
        - Observations are processed online; change localization is approximate and tied
@@ -69,13 +69,16 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         time_delay: int = 1,
         threshold: float = 0.2,
         normalize: bool = True,
+        anomaly_threshold: float = 3.0,
     ):
+        super().__init__()
         self._window_size = window_size
         self._embedding_dim = embedding_dim
         self._num_classes = num_classes
         self._time_delay = time_delay
         self._threshold = threshold
         self._normalize = normalize
+        self._anomaly_threshold = anomaly_threshold
 
         if num_classes**embedding_dim >= window_size:
             raise ValueError(
@@ -83,8 +86,8 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
                 f"should be less than window_size ({window_size})"
             )
 
-        self._buffer: deque[float] = deque(maxlen=window_size * 2)
-        self._entropy_values: list[float] = []
+        self._buffer: deque[float] = deque(maxlen=window_size)
+        self._entropy_values: deque[float] = deque(maxlen=200)
         self._position: int = 0
         self._last_change_point: Optional[int] = None
 
@@ -98,7 +101,7 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         :rtype: bool
         """
         if isinstance(observation, np.ndarray):
-            for obs in observation:
+            for obs in observation.flat:
                 self._process_single_observation(float(obs))
         else:
             self._process_single_observation(float(observation))
@@ -115,13 +118,10 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
                  or ``None`` if no change-point is detected.
         :rtype: int or None
         """
-        change_detected = self.detect(observation)
-
-        if change_detected:
+        if self.detect(observation):
             change_point = self._last_change_point
             self._last_change_point = None
             return change_point
-
         return None
 
     def _process_single_observation(self, observation: float) -> None:
@@ -131,50 +131,57 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         :param observation: New value to be appended to the rolling buffer.
         :type observation: float
         """
+        if len(self._buffer) >= self._window_size // 2:
+            current_mean = np.mean(self._buffer)
+            if abs(observation - current_mean) > self._anomaly_threshold:
+                self._last_change_point = self._position
+
         self._buffer.append(observation)
         self._position += 1
-        v = 10  # window length (in entropy samples) for mean-shift check
-        v1 = 2  # minimal length (in entropy samples) for first-difference check
 
-        min_required = self._window_size + (self._embedding_dim - 1) * self._time_delay
-        if len(self._buffer) < min_required:
+        v = 10
+        v1 = 2
+
+        if len(self._buffer) < self._window_size:
             return
 
-        current_window = np.array(list(self._buffer)[-self._window_size :])
-        current_entropy = self._calculate_dispersion_entropy(current_window)
+        current_window = np.fromiter(self._buffer, dtype=float)
+
+        if np.std(current_window) == 0:
+            current_entropy = 0.0
+        else:
+            current_entropy = self._calculate_dispersion_entropy_vectorized(current_window)
 
         if np.isinf(current_entropy) or np.isnan(current_entropy):
             current_entropy = 0.0
 
         self._entropy_values.append(current_entropy)
 
-        # Criterion 1: first-order entropy difference
-        if len(self._entropy_values) >= v1:
-            entropy_diff = abs(self._entropy_values[-1] - self._entropy_values[-2])
+        history_len = len(self._entropy_values)
+        entropy_history = list(self._entropy_values)
+
+        if history_len >= v1:
+            entropy_diff = abs(entropy_history[-1] - entropy_history[-2])
             if entropy_diff > self._threshold:
                 self._last_change_point = self._position - self._window_size // 2
 
-        # Criterion 2: short-term variance of entropy
-        if len(self._entropy_values) >= v1 + 3:
-            recent_entropies = self._entropy_values[-5:]
+        if history_len >= v1 + 3:
+            recent_entropies = entropy_history[-5:]
             entropy_variance = np.var(recent_entropies)
-            # mean is not used in this rule; kept for parity with other implementations
-            _ = np.mean(recent_entropies)
             if entropy_variance > self._threshold:
                 self._last_change_point = self._position - self._window_size // 4
 
-        # Criterion 3: mean shift between two adjacent windows of entropy
-        if len(self._entropy_values) >= v:
-            window1 = self._entropy_values[-10:-5]
-            window2 = self._entropy_values[-5:]
+        if history_len >= v:
+            window1 = entropy_history[-10:-5]
+            window2 = entropy_history[-5:]
             mean1 = np.mean(window1)
             mean2 = np.mean(window2)
             if abs(mean2 - mean1) > self._threshold * 1.5:
                 self._last_change_point = self._position - 2
 
-    def _calculate_dispersion_entropy(self, time_series: npt.NDArray[np.float64]) -> float:
+    def _calculate_dispersion_entropy_vectorized(self, time_series: npt.NDArray[np.float64]) -> float:
         """
-        Compute Dispersion Entropy for the given window.
+        Compute Dispersion Entropy for the given window using vectorized approach.
 
         **Steps**
 
@@ -189,26 +196,32 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         :rtype: float
         """
         N = len(time_series)
-        if self._embedding_dim > N:
-            return 0.0
 
         mu = np.mean(time_series)
         sigma = np.std(time_series)
-        if sigma == 0:
-            return 0.0
 
         y_series = norm.cdf(time_series, loc=mu, scale=sigma)
-        z_series = self._discretize_to_classes(y_series)
-        patterns = self._create_dispersion_patterns(z_series)
-        pattern_probs = self._calculate_pattern_probabilities(patterns)
-        de_value = self._calculate_shannon_entropy(pattern_probs)
+        z_series = np.clip(np.round(self._num_classes * y_series + 0.5), 1, self._num_classes).astype(np.int32)
+        n_patterns = N - (self._embedding_dim - 1) * self._time_delay
+
+        if n_patterns <= 0:
+            return 0.0
+
+        shape = (n_patterns, self._embedding_dim)
+        itemsize = z_series.strides[0]
+        strides = (itemsize, itemsize * self._time_delay)
+        patterns_view = np.lib.stride_tricks.as_strided(z_series, shape=shape, strides=strides)
+        _, counts = np.unique(patterns_view, axis=0, return_counts=True)
+
+        probs = counts / n_patterns
+        entropy = -np.sum(probs * np.log(probs))
 
         if self._normalize:
             max_entropy = np.log(self._num_classes**self._embedding_dim)
             if max_entropy > 0:
-                de_value = de_value / max_entropy
+                entropy /= max_entropy
 
-        return float(de_value)
+        return float(entropy)
 
     def _discretize_to_classes(self, y_series: npt.NDArray[np.float64]) -> npt.NDArray[np.int32]:
         """
@@ -235,7 +248,6 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         """
         N = len(z_series)
         patterns = []
-
         for i in range(N - (self._embedding_dim - 1) * self._time_delay):
             pattern = []
             for j in range(self._embedding_dim):
@@ -244,50 +256,7 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
                     pattern.append(z_series[idx])
             if len(pattern) == self._embedding_dim:
                 patterns.append(tuple(pattern))
-
         return patterns
-
-    def _calculate_pattern_probabilities(self, patterns: list[tuple[int, ...]]) -> dict[tuple[int, ...], float]:
-        """
-        Estimate pattern probabilities from the list of patterns.
-
-        :param patterns: Dispersion patterns extracted from the current window.
-        :type patterns: list[tuple[int, ...]]
-        :return: Mapping from pattern to its empirical probability.
-        :rtype: dict[tuple[int, ...], float]
-        """
-        if not patterns:
-            return {}
-
-        pattern_counts: dict[tuple[int, ...], int] = {}
-        for pattern in patterns:
-            pattern_counts[pattern] = pattern_counts.get(pattern, 0) + 1
-
-        total_patterns = len(patterns)
-        pattern_probs: dict[tuple[int, ...], float] = {}
-        for pattern, count in pattern_counts.items():
-            pattern_probs[pattern] = count / total_patterns
-
-        return pattern_probs
-
-    def _calculate_shannon_entropy(self, pattern_probs: dict[tuple[int, ...], float]) -> float:
-        """
-        Compute Shannon entropy from pattern probabilities.
-
-        :param pattern_probs: Empirical probability distribution of dispersion patterns.
-        :type pattern_probs: dict[tuple[int, ...], float]
-        :return: ``- Σ p * log(p)`` (natural logarithm).
-        :rtype: float
-        """
-        if not pattern_probs:
-            return 0.0
-
-        entropy = 0.0
-        for prob in pattern_probs.values():
-            if prob > 0:
-                entropy -= prob * np.log(prob)
-
-        return entropy
 
     def get_entropy_history(self) -> list[float]:
         """
@@ -296,7 +265,7 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         :return: A copy of the internal DisEn sequence evaluated at processed steps.
         :rtype: list[float]
         """
-        return self._entropy_values.copy()
+        return list(self._entropy_values)
 
     def get_current_parameters(self) -> dict[str, int | float | bool]:
         """
@@ -367,7 +336,7 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         if len(self._buffer) < self._window_size:
             return {}
 
-        current_window = np.array(list(self._buffer)[-self._window_size :])
+        current_window = np.fromiter(self._buffer, dtype=float)
         mu = np.mean(current_window)
         sigma = np.std(current_window)
         if sigma == 0:
@@ -375,13 +344,18 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
 
         y_series = norm.cdf(current_window, loc=mu, scale=sigma)
         z_series = self._discretize_to_classes(y_series)
-        patterns = self._create_dispersion_patterns(z_series)
 
-        pattern_counts: dict[tuple[int, ...], int] = {}
-        for pattern in patterns:
-            pattern_counts[pattern] = pattern_counts.get(pattern, 0) + 1
+        n_patterns = len(z_series) - (self._embedding_dim - 1) * self._time_delay
+        if n_patterns <= 0:
+            return {}
 
-        return pattern_counts
+        shape = (n_patterns, self._embedding_dim)
+        strides = (z_series.strides[0], z_series.strides[0] * self._time_delay)
+        patterns_view = np.lib.stride_tricks.as_strided(z_series, shape=shape, strides=strides)
+
+        unique_patterns, counts = np.unique(patterns_view, axis=0, return_counts=True)
+
+        return {tuple(pat): count for pat, count in zip(unique_patterns, counts)}
 
     def analyze_complexity(self) -> dict[str, Union[float, int]]:
         """
@@ -402,26 +376,27 @@ class DispersionEntropyAlgorithm(OnlineAlgorithm):
         if len(self._buffer) < self._window_size:
             return {}
 
-        current_window = np.array(list(self._buffer)[-self._window_size :])
-        current_entropy = self._calculate_dispersion_entropy(current_window)
+        current_window = np.fromiter(self._buffer, dtype=float)
+        current_entropy = self._calculate_dispersion_entropy_vectorized(current_window)
 
         pattern_dist = self.get_pattern_distribution()
         unique_patterns = len(pattern_dist)
-        max_possible_patterns = self._num_classes**self._embedding_dim
 
+        max_possible_patterns = self._num_classes**self._embedding_dim
         pattern_diversity = unique_patterns / max_possible_patterns if max_possible_patterns > 0 else 0
 
         max_entropy = np.log(max_possible_patterns) if max_possible_patterns > 0 else 1
-        relative_entropy = current_entropy / max_entropy if max_entropy > 0 else 0
+
+        normalized = current_entropy if self._normalize else (current_entropy / max_entropy if max_entropy > 0 else 0)
 
         return {
             "dispersion_entropy": current_entropy,
-            "normalized_entropy": relative_entropy,
+            "normalized_entropy": normalized if not self._normalize else current_entropy,
             "unique_patterns": unique_patterns,
             "max_possible_patterns": max_possible_patterns,
             "pattern_diversity": pattern_diversity,
-            "window_std": np.std(current_window),
-            "window_mean": np.mean(current_window),
+            "window_std": float(np.std(current_window)),
+            "window_mean": float(np.mean(current_window)),
         }
 
     def reset(self) -> None:
