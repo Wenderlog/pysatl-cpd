@@ -58,6 +58,7 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         threshold: float = 0.3,
         normalize: bool = True,
     ):
+        super().__init__()
         self._window_size = window_size
         self._embedding_dim = embedding_dim
         self._gamma = gamma
@@ -68,8 +69,8 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         if delta >= gamma:
             raise ValueError(f"delta ({delta}) must be less than gamma ({gamma})")
 
-        self._buffer: deque[float] = deque(maxlen=window_size * 2)
-        self._entropy_values: list[float] = []
+        self._buffer: deque[float] = deque(maxlen=window_size)
+        self._entropy_values: deque[float] = deque(maxlen=200)
         self._position: int = 0
         self._last_change_point: Optional[int] = None
 
@@ -84,11 +85,10 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         :rtype: bool
         """
         if isinstance(observation, np.ndarray):
-            for obs in observation:
+            for obs in observation.flat:
                 self._process_single_observation(float(obs))
         else:
             self._process_single_observation(float(observation))
-
         return self._last_change_point is not None
 
     def localize(self, observation: np.float64 | npt.NDArray[np.float64]) -> Optional[int]:
@@ -101,13 +101,10 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
                  or ``None`` if no change-point is detected.
         :rtype: int or None
         """
-        change_detected = self.detect(observation)
-
-        if change_detected:
-            change_point = self._last_change_point
+        if self.detect(observation):
+            cp = self._last_change_point
             self._last_change_point = None
-            return change_point
-
+            return cp
         return None
 
     def _process_single_observation(self, observation: float) -> None:
@@ -127,45 +124,42 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
            If any test exceeds its (scaled) threshold, a change-point is flagged and localized
            near the center or end of the current window.
         """
-        v = 2
         self._buffer.append(observation)
         self._position += 1
 
-        min_required = self._window_size + self._embedding_dim - 1
-        if len(self._buffer) < min_required:
+        if len(self._buffer) < self._window_size:
             return
 
-        current_window = np.array(list(self._buffer)[-self._window_size :])
-        current_entropy = self._calculate_slope_entropy(current_window)
+        current_window = np.fromiter(self._buffer, dtype=float)
+        current_entropy = self._calculate_slope_entropy_vectorized(current_window)
 
         if np.isinf(current_entropy) or np.isnan(current_entropy):
             current_entropy = 0.0
 
+        if len(self._entropy_values) >= 1 and abs(current_entropy - self._entropy_values[-1]) > self._threshold:
+            self._last_change_point = self._position - self._window_size // 2
+
         self._entropy_values.append(current_entropy)
 
-        if len(self._entropy_values) >= v:
-            entropy_diff = abs(self._entropy_values[-1] - self._entropy_values[-2])
-            if entropy_diff > self._threshold:
-                self._last_change_point = self._position - self._window_size // 2
+        hist_list = list(self._entropy_values)
+        long_win = 10
+        short_win = 8
 
-        if len(self._entropy_values) >= v * 5:
-            recent_window = self._entropy_values[-5:]
-            previous_window = self._entropy_values[-10:-5]
-            recent_mean = np.mean(recent_window)
-            previous_mean = np.mean(previous_window)
+        if (
+            len(hist_list) >= long_win
+            and abs(np.mean(hist_list[-5:]) - np.mean(hist_list[-10:-5])) > self._threshold * 0.8
+        ):
+            self._last_change_point = self._position - 2
 
-            if abs(recent_mean - previous_mean) > self._threshold * 0.8:
-                self._last_change_point = self._position - 2
+        if (
+            len(hist_list) >= short_win
+            and abs(np.var(hist_list[-4:]) - np.var(hist_list[-8:-4])) > self._threshold * 0.5
+        ):
+            self._last_change_point = self._position - 1
 
-        if len(self._entropy_values) >= v * 4:
-            recent_variance = np.var(self._entropy_values[-4:])
-            previous_variance = np.var(self._entropy_values[-8:-4])
-            if abs(recent_variance - previous_variance) > self._threshold * 0.5:
-                self._last_change_point = self._position - 1
-
-    def _calculate_slope_entropy(self, time_series: npt.NDArray[np.float64]) -> float:
+    def _calculate_slope_entropy_vectorized(self, time_series: np.ndarray) -> float:
         """
-        Compute slope entropy for the given window.
+        Compute slope entropy for the given window using vectorized approach.
 
         :param time_series: Current rolling window.
         :type time_series: numpy.ndarray
@@ -179,36 +173,37 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
            - If ``normalize=True``, the entropy is divided by the maximum possible
              entropy (``log2(#observed_patterns)``) to yield a normalized value in ``[0, 1]``.
         """
-        N = len(time_series)
-        if self._embedding_dim > N:
+        diffs = np.diff(time_series)
+        symbols = self._symbolize_slopes(diffs)
+
+        m_pattern = self._embedding_dim - 1
+        n_patterns = len(symbols) - m_pattern + 1
+        if n_patterns <= 0:
             return 0.0
 
-        pattern_counts: dict[tuple[int, ...], int] = {}
-        total_patterns = 0
+        shape = (n_patterns, m_pattern)
+        strides = (symbols.strides[0], symbols.strides[0])
+        patterns = np.lib.stride_tricks.as_strided(symbols, shape=shape, strides=strides)
 
-        for j in range(N - self._embedding_dim + 1):
-            subsequence = time_series[j : j + self._embedding_dim]
-            slope_pattern = self._create_slope_pattern(subsequence)
-            pattern_key = tuple(slope_pattern)
-            pattern_counts[pattern_key] = pattern_counts.get(pattern_key, 0) + 1
-            total_patterns += 1
-
-        if total_patterns == 0:
-            return 0.0
-
-        entropy = 0.0
-        for count in pattern_counts.values():
-            probability = count / total_patterns
-            if probability > 0:
-                entropy -= probability * np.log2(probability)
+        _, counts = np.unique(patterns, axis=0, return_counts=True)
+        probs = counts / n_patterns
+        entropy = -np.sum(probs * np.log2(probs))
 
         if self._normalize:
-            max_entropy = np.log2(len(pattern_counts)) if len(pattern_counts) > 1 else 1.0
+            max_entropy = np.log2(len(counts)) if len(counts) > 1 else 1.0
             entropy = entropy / max_entropy if max_entropy > 0 else 0.0
 
         return float(entropy)
 
-    def _create_slope_pattern(self, subsequence: npt.NDArray[np.float64]) -> list[int]:
+    def _symbolize_slopes(self, diffs: np.ndarray) -> np.ndarray:
+        symbols = np.zeros_like(diffs, dtype=int)
+        symbols[diffs > self._gamma] = 2
+        symbols[(diffs > self._delta) & (diffs <= self._gamma)] = 1
+        symbols[(diffs < -self._delta) & (diffs >= -self._gamma)] = -1
+        symbols[diffs < -self._gamma] = -2
+        return symbols
+
+    def _create_slope_pattern(self, subsequence: np.ndarray) -> list[int]:
         """
         Encode a length-``embedding_dim`` subsequence into a slope pattern.
 
@@ -227,24 +222,87 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         - ``-gamma <= d < -delta`` → ``-1`` (gentle negative)
         - ``d < -gamma`` → ``-2`` (steep negative)
         """
-        pattern = []
-        for i in range(1, len(subsequence)):
-            slope = subsequence[i] - subsequence[i - 1]
+        diffs = np.diff(subsequence)
+        return self._symbolize_slopes(diffs).tolist()
 
-            if slope > self._gamma:
-                symbol = 2
-            elif self._delta < slope <= self._gamma:
-                symbol = 1
-            elif abs(slope) <= self._delta:
-                symbol = 0
-            elif -self._gamma <= slope < -self._delta:
-                symbol = -1
-            else:
-                symbol = -2
+    def get_symbol_meanings(self) -> dict[int, str]:
+        return {
+            2: f"steep positive (d > {self._gamma})",
+            1: f"gentle positive ({self._delta} < d <= {self._gamma})",
+            0: f"flat/ties (|d| <= {self._delta})",
+            -1: f"gentle negative (-{self._gamma} <= d < -{self._delta})",
+            -2: f"steep negative (d < -{self._gamma})",
+        }
 
-            pattern.append(symbol)
+    def get_pattern_distribution(self) -> dict[tuple[int, ...], float]:
+        if len(self._buffer) < self._embedding_dim:
+            return {}
 
-        return pattern
+        current_window = np.fromiter(self._buffer, dtype=float)
+        diffs = np.diff(current_window)
+        symbols = self._symbolize_slopes(diffs)
+
+        m_pattern = self._embedding_dim - 1
+        n_patterns = len(symbols) - m_pattern + 1
+        if n_patterns <= 0:
+            return {}
+
+        shape = (n_patterns, m_pattern)
+        strides = (symbols.strides[0], symbols.strides[0])
+        patterns = np.lib.stride_tricks.as_strided(symbols, shape=shape, strides=strides)
+
+        unique_p, counts = np.unique(patterns, axis=0, return_counts=True)
+        return {tuple(p): float(c / n_patterns) for p, c in zip(unique_p, counts)}
+
+    def analyze_slope_characteristics(self) -> dict[str, Any]:
+        if len(self._buffer) < self._embedding_dim:
+            return {}
+
+        current_window = np.fromiter(self._buffer, dtype=float)
+        diffs = np.diff(current_window)
+        symbols = self._symbolize_slopes(diffs)
+
+        entropy = self._calculate_slope_entropy_vectorized(current_window)
+
+        steep_pos_sym = 2
+        gentle_pos_sym = 1
+        flat_sym = 0
+        gentle_neg_sym = -1
+        steep_neg_sym = -2
+
+        return {
+            "slope_entropy": entropy,
+            "steep_positive_ratio": float(np.mean(symbols == steep_pos_sym)),
+            "gentle_positive_ratio": float(np.mean(symbols == gentle_pos_sym)),
+            "flat_ratio": float(np.mean(symbols == flat_sym)),
+            "gentle_negative_ratio": float(np.mean(symbols == gentle_neg_sym)),
+            "steep_negative_ratio": float(np.mean(symbols == steep_neg_sym)),
+            "slope_mean": float(np.mean(diffs)),
+            "slope_std": float(np.std(diffs)),
+            "slope_variance": float(np.var(diffs)),
+            "total_patterns": len(symbols) - (self._embedding_dim - 2),
+        }
+
+    def demonstrate_encoding(self, data: list[float]) -> dict[str, Any]:
+        if len(data) < self._embedding_dim:
+            return {"error": "insufficient data", "original_data": data, "encoding_rules": self.get_symbol_meanings()}
+
+        data_arr = np.array(data)
+        diffs = np.diff(data_arr)
+        symbols = self._symbolize_slopes(diffs)
+
+        m_pattern = self._embedding_dim - 1
+        n_patterns = len(symbols) - m_pattern + 1
+        patterns = [tuple(symbols[i : i + m_pattern]) for i in range(n_patterns)]
+
+        return {
+            "original_data": data,
+            "slopes": diffs.tolist(),
+            "symbols": symbols.tolist(),
+            "patterns": patterns,
+            "slope_entropy": self._calculate_slope_entropy_vectorized(data_arr),
+            "encoding_rules": self.get_symbol_meanings(),
+        }
 
     def get_entropy_history(self) -> list[float]:
         """
@@ -253,7 +311,7 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         :return: A copy of the internal slope-entropy sequence evaluated at processed steps.
         :rtype: list[float]
         """
-        return self._entropy_values.copy()
+        return list(self._entropy_values)
 
     def get_current_parameters(self) -> dict[str, Any]:
         """
@@ -273,14 +331,7 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
             "max_patterns": 5 ** (self._embedding_dim - 1),
         }
 
-    def set_parameters(
-        self,
-        embedding_dim: Optional[int] = None,
-        gamma: Optional[float] = None,
-        delta: Optional[float] = None,
-        threshold: Optional[float] = None,
-        normalize: Optional[bool] = None,
-    ) -> None:
+    def set_parameters(self, **kwargs) -> None:
         """
         Update detector parameters in place.
 
@@ -296,17 +347,9 @@ class SlopeEntropyAlgorithm(OnlineAlgorithm):
         :type normalize: bool, optional
         :raises ValueError: If ``delta`` is not strictly less than ``gamma``.
         """
-        if embedding_dim is not None:
-            self._embedding_dim = embedding_dim
-        if gamma is not None:
-            self._gamma = gamma
-        if delta is not None:
-            self._delta = delta
-        if threshold is not None:
-            self._threshold = threshold
-        if normalize is not None:
-            self._normalize = normalize
-
+        for key, value in kwargs.items():
+            if hasattr(self, f"_{key}"):
+                setattr(self, f"_{key}", value)
         if self._delta >= self._gamma:
             raise ValueError(f"delta ({self._delta}) must be less than gamma ({self._gamma})")
 
